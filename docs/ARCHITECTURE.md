@@ -5,7 +5,7 @@ Cirrust is a **Tauri v2** desktop app: a **Rust** backend and a **Vue 3 + TypeSc
 talk to the backend over session D-Bus. It targets Linux / WebKitGTK.
 
 ```
-┌──────────────────────────────────────────────┐        ┌──────────────────┐
+┌───────────────────────────────────────────────┐        ┌──────────────────┐
 │  app/  (Tauri v2 desktop app)                 │        │ widget/, …       │
 │                                               │ D-Bus  │ Plasma/GNOME/    │
 │  ┌────────────┐  invoke/    ┌──────────────┐  │◄───────┤ Cinnamon panels  │
@@ -13,9 +13,9 @@ talk to the backend over session D-Bus. It targets Linux / WebKitGTK.
 │  │ Tailwind v4│ ◄─────────  │ auth·webdav  │  │        │ "sync now"       │
 │  └────────────┘  events     │ sync·pim·... │  │        └──────────────────┘
 │   views/stores              └──────┬───────┘  │
-└─────────────────────────────────────┼─────────┘
-                                       │ WebDAV / CalDAV / CardDAV / OCS
-                                       ▼
+└────────────────────────────────────┼──────────┘
+                                     │ WebDAV / CalDAV / CardDAV / OCS
+                                     ▼
                               Nextcloud / ownCloud
 ```
 

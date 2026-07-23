@@ -7,9 +7,24 @@
 
 app-id: org.cirrust.client
 runtime: org.gnome.Platform
-runtime-version: "47"
+# 48 is the newest GNOME runtime still built on freedesktop 24.08. 49 and 50
+# moved to 25.08, for which Flathub publishes no ffmpeg-full — bumping past 48
+# would silently drop the media codecs below.
+runtime-version: "48"
 sdk: org.gnome.Sdk
 command: cirrust
+
+# The runtime ships GStreamer but not the patent-restricted decoders, so
+# H.264/AAC/MP3 would not play — the Flatpak equivalent of the AppImage's
+# missing plugins. This extension supplies them; the version tracks the
+# freedesktop base of the GNOME runtime above (48 → 24.08), not the GNOME
+# version, and /app/lib/ffmpeg must exist for it to be mounted.
+add-extensions:
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    version: "24.08"
+    add-ld-path: .
+    autodelete: false
 
 finish-args:
   # Display + GPU
@@ -35,6 +50,8 @@ modules:
   - name: cirrust
     buildsystem: simple
     build-commands:
+      # Mount point for the ffmpeg-full extension declared above.
+      - mkdir -p /app/lib/ffmpeg
       # Unpack the deb (data tarball may be gz, xz or zst).
       - ar x cirrust.deb
       - tar xf data.tar.*

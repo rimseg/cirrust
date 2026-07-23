@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 — 2026-07-23
+
+Bug fixes for the first release.
+
+- **Media playback in the AppImage**: the bundle shipped GStreamer's core
+  libraries but none of its plugins, so WebKit found no demuxer, decoder or
+  sink — video never opened and audio stayed in "preparing". The plugins are
+  now bundled, and the release workflow installs them (plus `patchelf`, which
+  the bundling step requires) before building.
+- **Tray status before a server is reached**: a fresh install showed a green
+  "up to date" tray although no account had been restored and nothing had ever
+  been contacted. Both paths that published a synced state prematurely now
+  report offline.
+
 ## 0.1.0 — 2026-07-23
 
 First public release. A desktop client for Nextcloud (and compatible WebDAV

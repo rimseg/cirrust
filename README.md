@@ -12,54 +12,54 @@ A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
 
 ## Features
 
-- 🔐 **Secure login** via Nextcloud **Login Flow v2** (app password stored in
+- **Secure login** via Nextcloud **Login Flow v2** (app password stored in
   KWallet / Secret Service — never on disk).
-- 📁 **File manager** over WebDAV — browse, search, download, **upload**
+- **File manager** over WebDAV — browse, search, download, **upload**
   (button + drag-and-drop from your desktop), **create folders**, **rename/move**,
   and multi-select bulk delete. An expandable-tree (Dolphin-style details) view
   with a **sticky location breadcrumb**, **type-ahead** jump (press a letter),
   **Ctrl/Cmd+F** to search, and a **right-click menu at the cursor** —
   including **Open in file manager** (reveal the synced copy) and, when you
   download an already-synced file, an offer to reveal it instead of re-fetching.
-- 👁️ **File preview** — images, video, PDFs and text/code in a modal. Images get
+- **File preview** — images, video, PDFs and text/code in a modal. Images get
   a **gallery** with arrow-key navigation and a **thumbnail filmstrip**. **Video
   plays local-first** (from your synced copy when present, otherwise streamed)
   through a loopback HTTP media server so the timeline and **seeking** work on
   WebKitGTK, with **fullscreen** (`F` / double-click) and autoplay.
-- 🔗 **Public links** — create/copy/revoke Nextcloud share links (optional
+- **Public links** — create/copy/revoke Nextcloud share links (optional
   password + expiry) via the OCS Sharing API.
-- 🔄 **Folder sync** — register local↔remote folder pairs kept up to date by a
+- **Folder sync** — register local↔remote folder pairs kept up to date by a
   custom Rust WebDAV sync engine (runs in the background via the tray).
-- 📊 **Live sync observability** — see the current file, per-file and overall
+- **Live sync observability** — see the current file, per-file and overall
   progress bars, transfer **speed**, files/bytes done vs. total, and a recent
   **activity feed** (uploads/downloads/deletions/conflicts/errors). Downloads
   stream with live byte progress; the sidebar shows a live speed readout.
-- 🎛️ **Sync controls** — global + per-folder pause/resume, ignore patterns
+- **Sync controls** — global + per-folder pause/resume, ignore patterns
   (`*.tmp`, `node_modules`, …), and conflict resolution (keep mine / keep server).
-- 📈 **Account overview** — storage quota/usage, account + server info, and the
+- **Account overview** — storage quota/usage, account + server info, and the
   server-side activity feed (via the OCS API).
-- 🗑️ **Trash bin** — list, restore, delete forever or empty Nextcloud's trash.
-- 📅 **Calendar (CalDAV)** — **two-way** sync of your Nextcloud calendars.
+- **Trash bin** — list, restore, delete forever or empty Nextcloud's trash.
+- **Calendar (CalDAV)** — **two-way** sync of your Nextcloud calendars.
   **Agenda** and **month** views, per-calendar colour filters, and create / edit /
   delete events (all-day or timed, location, notes). Cached on disk for instant
   offline load, reconciled in the background by CTag with a manual refresh.
-- 👥 **Contacts (CardDAV)** — **two-way** sync of your address books. Searchable
+- **Contacts (CardDAV)** — **two-way** sync of your address books. Searchable
   list + detail pane; create / edit / delete contacts with multiple emails and
   phone numbers, organization, title and notes. Edits are **lossless** — an
   iCalendar/vCard content-line codec preserves properties the UI doesn't model
   (recurrence rules, alarms, contact photos, custom `X-` fields), and writes are
   guarded by **ETags** (`If-Match`) so a concurrent change never clobbers.
-- 🎵 **Inline audio playback** — click an audio file to play it in the bottom
+- **Inline audio playback** — click an audio file to play it in the bottom
   **player bar**, which queues the folder's other tracks. Decoded through the
   **Web Audio API** for clean, gapless playback; synced files play from the
   local copy, the rest stream on demand. **Space** toggles play/pause anywhere.
-- 🔔 **Desktop notifications** on sync errors and new conflicts.
-- 🚀 **Autostart** — start on login minimized to the tray (toggle in Overview
+- **Desktop notifications** on sync errors and new conflicts.
+- **Autostart** — start on login minimized to the tray (toggle in Overview
   or the tray menu).
-- 🌗 **Light / dark / system theme** — a switch in **Overview → Appearance**
+- **Light / dark / system theme** — a switch in **Overview → Appearance**
   (persisted); "System" follows the Plasma/OS colour scheme. Subtle animations
   with reduced-motion support. Icons by [Lucide](https://lucide.dev).
-- 🧩 **Plasma 6 widget** — shows live sync state in your panel.
+- **Plasma 6 widget** — shows live sync state in your panel.
 
 ## Installation
 
@@ -75,11 +75,11 @@ chmod +x Cirrust_*.AppImage
 ./Cirrust_*.AppImage
 ```
 
-Works on every distro (WebKitGTK is bundled). Notes:
+Works on every distro (WebKitGTK and the GStreamer codecs are bundled). Notes:
 - Some minimal distros lack `libfuse2`; either install it or run with
   `--appimage-extract-and-run`.
-- Music/video playback uses the **host's** GStreamer codecs — for MP3/AAC on a
-  fresh system install your distro's `gst-plugins-good/bad/ugly` + `gst-libav`.
+- Music and video play out of the box — the AppImage carries its own GStreamer
+  plugins, so no codec packages are needed on the host.
 - Optional: use a tool like *Gear Lever* or `appimaged` for menu integration.
 
 ### Flatpak (sandboxed)
@@ -193,13 +193,17 @@ sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file \
 #   "Failed to load ayatana-appindicator3 ... libayatana-appindicator3.so.1")
 sudo pacman -S --needed libayatana-appindicator
 
-# Audio codecs for the music player (WebKitGTK uses GStreamer)
+# Audio/video codecs (WebKitGTK plays media through GStreamer)
 sudo pacman -S --needed gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
+
+# Only to build an AppImage: the bundler copies these codecs into the bundle
+# and shells out to patchelf, failing without it.
+sudo pacman -S --needed patchelf
 
 # KWallet Secret Service (for credential storage) is part of Plasma already.
 ```
 
-Node 20+ and npm are also required (already present on this system).
+Node 20 or newer and npm are also required (CI builds on Node 22).
 
 ## Running
 
@@ -225,6 +229,13 @@ produces the bundles under `app/src-tauri/target/release/bundle/`: the
 > `NO_STRIP=1` is required on rolling-release distros: linuxdeploy's bundled
 > `strip` cannot handle modern `.relr.dyn` ELF sections and the AppImage
 > bundling fails without it.
+
+The AppImage bundles GStreamer (`bundle.linux.appimage.bundleMediaFramework`),
+copying the codec plugins from the build machine — so they must be installed
+locally or media playback silently ends up missing from the bundle. On Arch /
+Manjaro the plugin helper directory is not where the bundler expects it, so
+pass `GSTREAMER_HELPERS_DIR=/usr/lib/gstreamer-1.0`; Debian/Ubuntu needs no
+override.
 
 The GitHub Actions workflow in `.github/workflows/release.yml` builds and
 attaches the **AppImage** to a draft release on every `v*` tag push.

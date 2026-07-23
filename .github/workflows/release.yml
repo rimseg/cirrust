@@ -8,7 +8,15 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    # The bundled WebKitGTK inherits the runner's version. 22.04's is too old
+    # to initialise EGL on very new Mesa — the WebProcess aborts and the window
+    # renders blank white. We track the newest available image so the bundled
+    # WebKit stays current with modern GPU stacks; 26.04 is a preview runner but
+    # its WebKit is contemporaneous with recent Mesa, which is exactly what the
+    # blank-window fix needs. Trade-off: a higher glibc floor (~2.41), so the
+    # AppImage needs a reasonably recent host. If the preview image is ever
+    # unavailable, fall back to ubuntu-24.04 (the newest GA runner).
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:

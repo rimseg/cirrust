@@ -4,19 +4,27 @@
 # distro without installing Rust/Node/WebKitGTK locally — the app itself is a
 # desktop-session program and is not meant to RUN inside a container.
 #
-# Ubuntu 22.04 is used deliberately: AppImages inherit the glibc of the build
-# system, so building on the oldest supported LTS maximizes compatibility.
+# The base version is a balance. AppImages inherit the build system's glibc, so
+# an older base runs on more hosts — but the bundled WebKitGTK is inherited too,
+# and a too-old WebKit cannot initialise EGL on very new Mesa, leaving the window
+# blank white. This tracks the CI base (see .github/workflows/release.yml) so a
+# Docker-built AppImage matches the released one: a WebKit contemporaneous with
+# current GPU stacks, at the cost of a higher glibc floor (~2.41).
 
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Tauri v2 Linux build dependencies.
+# Tauri v2 Linux build dependencies. The gstreamer plugins are required at BUILD
+# time: bundleMediaFramework copies them into the AppImage, so absent here they
+# are silently missing from the bundle and media never plays.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget file xz-utils git \
     build-essential pkg-config patchelf desktop-file-utils \
     libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
     libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 22 (frontend toolchain).

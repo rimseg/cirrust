@@ -72,19 +72,22 @@ A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
 
 ## Installation
 
-Cirrust ships three ways — an **AppImage** (any distro), a **Flatpak**
+Cirrust ships three ways — an **AppImage** (most distros), a **Flatpak**
 (sandboxed), or a **native build from source**. Grab the AppImage from the
 GitHub **Releases** page; the Flatpak and native builds you produce yourself.
 (No `.deb`/`.rpm` packages are provided.)
 
-### AppImage — any distro, no installation
+### AppImage — most distros, no installation
 
 ```bash
 chmod +x Cirrust_*.AppImage
 ./Cirrust_*.AppImage
 ```
 
-Works on every distro (WebKitGTK and the GStreamer codecs are bundled). Notes:
+Self-contained (WebKitGTK and the GStreamer codecs are bundled). Notes:
+- Needs a reasonably recent host — **glibc 2.41 or newer** (roughly Ubuntu 24.10+
+  / Fedora 40+ / Arch). The bundle's WebKit has to be current enough to drive
+  modern GPU drivers; on an older glibc, build from source or use the Flatpak.
 - Some minimal distros lack `libfuse2`; either install it or run with
   `--appimage-extract-and-run`.
 - Music and video play out of the box — the AppImage carries its own GStreamer
@@ -154,11 +157,11 @@ service (`org.cirrust.client.Daemon`):
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐        ┌──────────────────┐
+┌──────────────────────────────────────────────┐        ┌──────────────────┐
 │  app/  (Tauri v2 desktop app)                │        │ widget/          │
 │                                              │        │ Plasma 6 plasmoid│
 │  ┌────────────┐   invoke/   ┌─────────────┐  │ D-Bus  │ (QML)            │
-│  │ Vue 3 + TS │ ──────────► │ Rust backend│ ◄┼────────┤ sync status +    │
+│  │ Vue 3 + TS │ ──────────► │ Rust backend│◄─┼────────┤ sync status +    │
 │  │ Tailwind v4│ ◄────────── │             │  │        │ "sync now"       │
 │  └────────────┘   events    │ auth·webdav │  │        └──────────────────┘
 │   file browser              │ sync · pim  │  │
@@ -259,10 +262,12 @@ DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose run --rm build
 # → bundles appear in ./dist/bundle/ (AppImage + the Flatpak-input .deb)
 ```
 
-The image (see `packaging/docker/Dockerfile.build`) is based on Ubuntu 22.04
-on purpose: AppImages inherit the build system's glibc, so an older LTS base
-maximizes compatibility. Cargo and npm caches persist in named volumes, so
-rebuilds are incremental.
+The image (see `packaging/docker/Dockerfile.build`) tracks the same Ubuntu base
+as CI. AppImages inherit the build system's glibc *and* WebKit, and a base too
+old to drive current GPU drivers leaves the window blank — so the base is kept
+recent enough to render, at the cost of requiring a fairly recent host to run
+the result. Cargo and npm caches persist in named volumes, so rebuilds are
+incremental.
 
 > Note: Docker is only used to **build**. The app itself is a desktop-session
 > program (tray, session D-Bus, KWallet, audio) and is not meant to run in a

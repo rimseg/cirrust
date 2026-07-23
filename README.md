@@ -1,4 +1,8 @@
-# Cirrust
+<p align="center">
+  <img src="docs/images/logo.svg" width="96" height="96" alt="Cirrust logo">
+</p>
+
+<h1 align="center">Cirrust</h1>
 
 A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
 **contacts** — for compatible WebDAV / CalDAV / CardDAV servers, built for
@@ -9,6 +13,11 @@ A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
 > sponsored by Nextcloud GmbH or KDE e.V. "Nextcloud" and "KDE" are trademarks
 > of their respective owners; they are used here only to describe
 > compatibility.
+
+<p align="center">
+  <img src="docs/images/overview.png" width="900"
+       alt="The Cirrust Overview view in dark theme: sync status, storage quota and synced folders">
+</p>
 
 ## Features
 

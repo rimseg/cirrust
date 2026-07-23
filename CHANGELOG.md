@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 — 2026-07-23
+
+- **Blank white AppImage window**: the bundled WebKitGTK was inherited from an
+  Ubuntu 22.04 build base, too old to initialise EGL on very new Mesa — the web
+  process aborted before painting and the window came up blank. The AppImage
+  (CI and Docker) now builds on a newer base whose WebKit drives current GPU
+  stacks. This raises the glibc floor: the AppImage needs a reasonably recent
+  host (glibc 2.41+); on older systems, build from source or use the Flatpak.
+- **Flatpak media playback**: declared the `ffmpeg-full` codec extension the
+  GNOME runtime omits, so H.264/AAC/MP3 play there too, and moved to the GNOME
+  48 runtime.
+
 ## 0.1.1 — 2026-07-23
 
 Bug fixes for the first release.

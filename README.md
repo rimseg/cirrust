@@ -4,10 +4,13 @@
 
 <h1 align="center">Cirrust</h1>
 
-A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
-**contacts** — for compatible WebDAV / CalDAV / CardDAV servers, built for
-**Plasma 6** (KDE / Manjaro) as a **Tauri v2 + Vue 3** application with a native
-**Plasma widget** for sync status.
+A modern, lightweight **Linux desktop Nextcloud client** — files, **calendars**
+and **contacts** — for compatible WebDAV / CalDAV / CardDAV servers. Built with
+**Tauri v2 + Vue 3**, it runs on any desktop environment through standard
+freedesktop interfaces (tray, keyring, notifications) and ships as a
+self-contained **AppImage** and **Flatpak**. Optional native panel widgets are
+provided for **KDE Plasma 6**, **GNOME** and **Cinnamon**; development happens on
+Plasma, which is the most polished target but not a requirement.
 
 > **Unofficial project.** Cirrust is not affiliated with, endorsed by, or
 > sponsored by Nextcloud GmbH or KDE e.V. "Nextcloud" and "KDE" are trademarks

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.3 — 2026-07-23
+
+- **First-play freeze**: the first audio track or video after launch stalled the
+  UI for several seconds while GStreamer built its plugin registry on first use
+  (a bigger cost now that the AppImage bundles its own codecs). The decoder is
+  now primed in the background at startup, so that one-time scan no longer lands
+  on the first play or preview.
+- Dropped the unused `@tauri-apps/plugin-notification` JS package (notifications
+  are sent from the Rust backend), and reworded the README to describe Cirrust as
+  a cross-distro Linux client rather than KDE/Manjaro-specific.
+
 ## 0.1.2 — 2026-07-23
 
 - **Blank white AppImage window**: the bundled WebKitGTK was inherited from an

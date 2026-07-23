@@ -75,6 +75,11 @@ impl SyncManager {
         let paused = Arc::new(AtomicBool::new(cfg0.paused));
         let mut initial = SyncStatus::new(count);
         initial.paused = cfg0.paused;
+        // Nothing is known about the server yet — no account has even been
+        // restored at this point. Any state but Offline is a guess, and the
+        // guess that misleads is "synced": a green tray on a fresh install
+        // claims the data is safe when nothing has ever been contacted.
+        initial.state = if cfg0.paused { SyncState::Paused } else { SyncState::Offline };
         let (status_tx, status_rx) = watch::channel(initial);
         let (progress_tx, progress_rx) = watch::channel(Progress::default());
         let (trigger, trigger_rx) = mpsc::unbounded_channel();
@@ -323,9 +328,14 @@ async fn run_all(
             );
             return;
         }
-        // Not signed in — fall through; the per-folder `client_for` miss below
-        // reports it as offline with no message.
-        None => {}
+        // No account signed in. There is nothing to sync and nothing has been
+        // contacted, so the run must not fall through to the "finished with no
+        // errors" path at the bottom — that publishes Idle, i.e. a green tray
+        // reading "up to date" on a machine that has never reached a server.
+        None => {
+            publish(app, status_tx, SyncState::Offline, None, None, count, false);
+            return;
+        }
     }
 
     let state = app.state::<AppState>();

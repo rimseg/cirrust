@@ -53,6 +53,49 @@ export const usePlayerStore = defineStore("player", () => {
     return ctx;
   }
 
+  // A minimal valid silent PCM WAV, used only to prime the decoder.
+  function silentWav(): ArrayBuffer {
+    const rate = 8000;
+    const samples = 8;
+    const buf = new ArrayBuffer(44 + samples * 2);
+    const v = new DataView(buf);
+    const tag = (o: number, s: string) => {
+      for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i));
+    };
+    tag(0, "RIFF");
+    v.setUint32(4, buf.byteLength - 8, true);
+    tag(8, "WAVE");
+    tag(12, "fmt ");
+    v.setUint32(16, 16, true); // PCM header size
+    v.setUint16(20, 1, true); // format = PCM
+    v.setUint16(22, 1, true); // mono
+    v.setUint32(24, rate, true);
+    v.setUint32(28, rate * 2, true); // byte rate
+    v.setUint16(32, 2, true); // block align
+    v.setUint16(34, 16, true); // bits per sample
+    tag(36, "data");
+    v.setUint32(40, samples * 2, true); // samples are already zero (silence)
+    return buf;
+  }
+
+  let warmed = false;
+  // Prime the platform audio decoder once, in the background, at startup.
+  // Under WebKitGTK both `decodeAudioData` (audio) and `<video>` go through
+  // GStreamer, whose first-ever use builds a plugin registry — several seconds
+  // with the AppImage's bundled codecs. Left to the first real play or preview,
+  // that one-time scan lands as a multi-second freeze; doing it here moves it
+  // off the interaction. The registry is process-wide, so warming it via a
+  // tiny audio decode also covers the first video. Best-effort.
+  async function warmUp() {
+    if (warmed) return;
+    warmed = true;
+    try {
+      await ensureCtx().decodeAudioData(silentWav());
+    } catch {
+      // The scan happens regardless of whether this trivial clip decodes.
+    }
+  }
+
   /** Live playback position in seconds. */
   function position(): number {
     if (playing.value && ctx) return startOffset + (ctx.currentTime - startCtxTime);
@@ -236,6 +279,7 @@ export const usePlayerStore = defineStore("player", () => {
     seek,
     setVolume,
     close,
+    warmUp,
   };
 });
 

@@ -3,13 +3,25 @@ import { onMounted } from "vue";
 import { RouterView } from "vue-router";
 import { storeToRefs } from "pinia";
 import { useAuthStore } from "./stores/auth";
+import { usePlayerStore } from "./stores/player";
 import TopBar from "./components/TopBar.vue";
 import PlayerBar from "./components/PlayerBar.vue";
 
 const authStore = useAuthStore();
 const { account } = storeToRefs(authStore);
 
-onMounted(() => authStore.refresh());
+onMounted(() => {
+  authStore.refresh();
+  // Prime the media decoder in the background so the first audio play or video
+  // preview isn't stalled by GStreamer's one-time plugin scan. Deferred to idle
+  // so it never competes with the initial render.
+  const warm = () => void usePlayerStore().warmUp();
+  if ("requestIdleCallback" in window) {
+    requestIdleCallback(warm, { timeout: 3000 });
+  } else {
+    setTimeout(warm, 1500);
+  }
+});
 </script>
 
 <template>

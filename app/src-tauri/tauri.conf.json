@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cirrust",
+  "mainBinaryName": "cirrust",
+  "version": "0.1.0",
+  "identifier": "org.cirrust.client",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Cirrust",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 520,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: stream: http://stream.localhost; media-src 'self' blob: stream: http://stream.localhost http://127.0.0.1:*; object-src stream: http://stream.localhost; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:; base-uri 'self'; form-action 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "targets": ["appimage", "deb"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-plugins-ugly",
+          "gstreamer1.0-libav"
+        ]
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

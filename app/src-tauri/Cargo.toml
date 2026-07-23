@@ -1,0 +1,74 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Cirrust — an unofficial desktop sync client for Nextcloud and compatible WebDAV servers"
+authors = ["rimseg <dev@wnzke.de>"]
+license = "MIT"
+repository = "https://github.com/rimseg/cirrust"
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name unique so it does not conflict with the
+# bin name (only an issue on Windows, see rust-lang/cargo#8519).
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Optimize hashing/crypto/compression deps even in dev builds — they're
+# CPU-hot during sync verification and painfully slow when unoptimized, yet
+# rarely recompiled, so this costs nothing after the first build.
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.md-5]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.cpufeatures]
+opt-level = 3
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-autostart = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime + HTTP / WebDAV
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+# `rustls-tls-native-roots` trusts the OS certificate store (like curl), so
+# self-hosted servers with an internal/company CA validate correctly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# WebDAV PROPFIND parsing (manual, robust — avoids serde-xml quirks)
+roxmltree = "0.20"
+url = "2"
+percent-encoding = "2"
+
+# Secure credential storage via the Secret Service (KWallet on KDE)
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+# Session D-Bus service consumed by the Plasma widget
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Sync engine: local filesystem watching + tree walking
+notify = "6"
+walkdir = "2"
+
+# Checksum-based sync verification (Nextcloud stores SHA1/MD5 per upload)
+sha1 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+
+# Errors, time, logging
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+tauri-plugin-log = "2"

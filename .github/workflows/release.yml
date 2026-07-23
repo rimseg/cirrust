@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Run tests
+        working-directory: app/src-tauri
+        run: cargo test
+
+      - name: Build & attach the AppImage
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: app
+          # Only the AppImage is shipped as a release asset. The Flatpak is built
+          # separately (packaging/flatpak/build.sh) and .deb/.rpm are not provided.
+          args: "--bundles appimage"
+          tagName: ${{ github.ref_name }}
+          releaseName: "Cirrust ${{ github.ref_name }}"
+          releaseDraft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # linuxdeploy's bundled strip breaks on modern .relr.dyn sections
+          NO_STRIP: "true"

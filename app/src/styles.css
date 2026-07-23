@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/* KDE Breeze-inspired theme tokens, exposed to Tailwind v4 via @theme so we can
+   use utilities like `bg-surface`, `text-accent`, `border-line`. Utilities
+   compile to var() references, so the dark palette below simply overrides the
+   variables when the system theme is dark. */
+@theme {
+  --color-accent: #3daee9; /* Breeze blue */
+  --color-accent-strong: #2980b9;
+  --color-positive: #27ae60;
+  --color-negative: #da4453;
+  --color-warning: #f67400;
+
+  --color-canvas: #fcfcfc;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f3f4f6;
+  --color-line: #e2e4e8;
+  --color-ink: #232629;
+  --color-ink-soft: #6b7280;
+
+  /* Font stack with explicit CJK families so Japanese/Chinese/Korean don't fall
+     back to tofu. Set here so Tailwind's default (applied to <html>) and the
+     `font-sans` utility both use it — not just the `body` rule below. JP is
+     listed before SC/TC so shared Han glyphs render with Japanese shapes. */
+  --font-sans: "Noto Sans", "Noto Sans CJK JP", "Noto Sans CJK SC",
+    "Noto Sans CJK TC", "Noto Sans CJK KR", "Noto Color Emoji", "Segoe UI",
+    "DejaVu Sans", system-ui, sans-serif;
+}
+
+/* Dark palette. Applied either when the user explicitly picks "dark"
+   (`data-theme="dark"`) or, in "system" mode (no `data-theme` attribute), when
+   the OS/Plasma scheme is dark. An explicit `data-theme` always wins over the
+   media query because `:not([data-theme])` stops the system rule from matching. */
+:root[data-theme="dark"] {
+  --color-canvas: #1b1e20;
+  --color-surface: #232629;
+  --color-surface-alt: #2a2e32;
+  --color-line: #3a3f44;
+  --color-ink: #eff0f1;
+  --color-ink-soft: #9aa0a6;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-canvas: #1b1e20;
+    --color-surface: #232629;
+    --color-surface-alt: #2a2e32;
+    --color-line: #3a3f44;
+    --color-ink: #eff0f1;
+    --color-ink-soft: #9aa0a6;
+  }
+}
+
+/* Forcing light must pin the native control scheme too, else selects/scrollbars
+   stay dark when the OS is dark. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Native controls (selects, inputs, scrollbars) follow the theme too. */
+:root {
+  color-scheme: light dark;
+}
+
+/* Thin, unobtrusive scrollbars in the Breeze style. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+/* ---------------------------------------------------------------------------
+ * Motion: shared transition classes used with Vue's <Transition>.
+ * ------------------------------------------------------------------------- */
+
+/* Route changes: quick fade + slight rise. */
+.view-enter-active,
+.view-leave-active {
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.view-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.view-leave-to {
+  opacity: 0;
+}
+
+/* Overlays (preview, dialogs): fade the backdrop… */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* Gallery: fade each image in as you step through them. The keyed <img> is
+   recreated on navigation, so this animation replays per image. */
+.pfade {
+  animation: pfade-in 0.16s ease;
+}
+@keyframes pfade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* …and let dialog cards pop in slightly. */
+.pop-enter-active {
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+.pop-leave-active {
+  transition: opacity 0.12s ease;
+}
+.pop-enter-from {
+  opacity: 0;
+  transform: scale(0.96);
+}
+.pop-leave-to {
+  opacity: 0;
+}
+
+/* Respect reduced-motion preferences globally. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

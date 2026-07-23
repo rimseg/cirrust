@@ -1,0 +1,10 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Breeze-blue rounded square with white "cirrus streaks" (Cirrust = cirrus cloud). -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#3daee9"/>
+  <g transform="translate(64 64) scale(28)" fill="none" stroke="#ffffff"
+     stroke-width="2.3" stroke-linecap="round">
+    <path d="M10 11q4-1.6 9 0"/>
+    <path d="M7 16.5q6.5-2.2 17 0"/>
+    <path d="M11 22q4-1.4 8.5 0"/>
+  </g>
+</svg>

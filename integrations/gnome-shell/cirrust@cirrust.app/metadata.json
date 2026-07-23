@@ -1,0 +1,7 @@
+{
+  "uuid": "cirrust@cirrust.app",
+  "name": "Cirrust",
+  "description": "Sync status indicator for the Cirrust desktop app: state icon in the top bar, sync-now and open actions.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": ""
+}

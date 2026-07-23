@@ -1,0 +1,42 @@
+# Reproducible build environment for Cirrust.
+#
+# This image is for BUILDING the Linux bundles (AppImage/deb/rpm) on any
+# distro without installing Rust/Node/WebKitGTK locally — the app itself is a
+# desktop-session program and is not meant to RUN inside a container.
+#
+# Ubuntu 22.04 is used deliberately: AppImages inherit the glibc of the build
+# system, so building on the oldest supported LTS maximizes compatibility.
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Tauri v2 Linux build dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget file xz-utils git \
+    build-essential pkg-config patchelf desktop-file-utils \
+    libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+    libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 (frontend toolchain).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust, installed system-wide so the container can run as any host UID
+# (compose maps your user so build artifacts aren't root-owned).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable \
+    && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"
+
+# linuxdeploy (Tauri's AppImage tooling) is itself an AppImage and cannot use
+# FUSE inside a container — extract-and-run instead.
+ENV APPIMAGE_EXTRACT_AND_RUN=1 \
+    NO_STRIP=true \
+    HOME=/tmp
+
+WORKDIR /work/app

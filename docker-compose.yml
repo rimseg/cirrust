@@ -1,0 +1,35 @@
+# Containerized BUILD environment (the app itself runs on the desktop, not in
+# Docker). Produces the AppImage (+ the .deb the Flatpak wraps) without local
+# Rust/Node/WebKitGTK:
+#
+#   docker compose run --rm build
+#
+# Bundles land in ./dist/bundle/ on the host. Cargo/node caches persist in
+# named volumes, so incremental rebuilds are fast.
+
+services:
+  build:
+    build:
+      context: packaging/docker
+      dockerfile: Dockerfile.build
+    # Run as your host user so ./dist isn't root-owned.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    volumes:
+      - .:/work
+      # Isolated from the host: native binaries (esbuild, target/) differ
+      # between the container's glibc and your distro's.
+      - node-modules:/work/app/node_modules
+      - cargo-target:/work/app/src-tauri/target
+      - cargo-registry:/usr/local/cargo/registry
+    working_dir: /work/app
+    command: >
+      bash -c "npm ci &&
+               npm run tauri build &&
+               mkdir -p /work/dist &&
+               cp -rv src-tauri/target/release/bundle /work/dist/ &&
+               echo 'Bundles copied to ./dist/bundle/'"
+
+volumes:
+  node-modules:
+  cargo-target:
+  cargo-registry:

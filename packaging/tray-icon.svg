@@ -1,0 +1,12 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Monochrome tray glyph: filled white Lucide "cloud" (lucide.dev, ISC),
+       horizontally mirrored so the large hump sits toward the bottom-right
+       where the runtime status badge is composited — the badge then overlaps
+       bulk instead of hiding the distinctive small puff. A thin dark outline
+       keeps it visible on light panels. -->
+  <g transform="translate(31 30) scale(2.3) scale(-1 1) translate(-12 -12)">
+    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"
+          fill="#ffffff" stroke="#1e2f3c" stroke-opacity="0.6"
+          stroke-width="1.4" stroke-linejoin="round"/>
+  </g>
+</svg>

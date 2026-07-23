@@ -1,0 +1,19 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Id": "org.cirrust.client",
+    "Name": "Cirrust",
+    "Description": "Shows the syncing state of your Cirrust folders",
+    "Icon": "cloud-upload",
+    "Version": "0.1.0",
+    "License": "MIT",
+    "Category": "System Information",
+    "Authors": [
+      {
+        "Name": "Cirrust contributors",
+        "Email": ""
+      }
+    ]
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

@@ -1,0 +1,316 @@
+# Cirrust
+
+A modern, lightweight desktop **Nextcloud client** — files, **calendars** and
+**contacts** — for compatible WebDAV / CalDAV / CardDAV servers, built for
+**Plasma 6** (KDE / Manjaro) as a **Tauri v2 + Vue 3** application with a native
+**Plasma widget** for sync status.
+
+> **Unofficial project.** Cirrust is not affiliated with, endorsed by, or
+> sponsored by Nextcloud GmbH or KDE e.V. "Nextcloud" and "KDE" are trademarks
+> of their respective owners; they are used here only to describe
+> compatibility.
+
+## Features
+
+- 🔐 **Secure login** via Nextcloud **Login Flow v2** (app password stored in
+  KWallet / Secret Service — never on disk).
+- 📁 **File manager** over WebDAV — browse, search, download, **upload**
+  (button + drag-and-drop from your desktop), **create folders**, **rename/move**,
+  and multi-select bulk delete. An expandable-tree (Dolphin-style details) view
+  with a **sticky location breadcrumb**, **type-ahead** jump (press a letter),
+  **Ctrl/Cmd+F** to search, and a **right-click menu at the cursor** —
+  including **Open in file manager** (reveal the synced copy) and, when you
+  download an already-synced file, an offer to reveal it instead of re-fetching.
+- 👁️ **File preview** — images, video, PDFs and text/code in a modal. Images get
+  a **gallery** with arrow-key navigation and a **thumbnail filmstrip**. **Video
+  plays local-first** (from your synced copy when present, otherwise streamed)
+  through a loopback HTTP media server so the timeline and **seeking** work on
+  WebKitGTK, with **fullscreen** (`F` / double-click) and autoplay.
+- 🔗 **Public links** — create/copy/revoke Nextcloud share links (optional
+  password + expiry) via the OCS Sharing API.
+- 🔄 **Folder sync** — register local↔remote folder pairs kept up to date by a
+  custom Rust WebDAV sync engine (runs in the background via the tray).
+- 📊 **Live sync observability** — see the current file, per-file and overall
+  progress bars, transfer **speed**, files/bytes done vs. total, and a recent
+  **activity feed** (uploads/downloads/deletions/conflicts/errors). Downloads
+  stream with live byte progress; the sidebar shows a live speed readout.
+- 🎛️ **Sync controls** — global + per-folder pause/resume, ignore patterns
+  (`*.tmp`, `node_modules`, …), and conflict resolution (keep mine / keep server).
+- 📈 **Account overview** — storage quota/usage, account + server info, and the
+  server-side activity feed (via the OCS API).
+- 🗑️ **Trash bin** — list, restore, delete forever or empty Nextcloud's trash.
+- 📅 **Calendar (CalDAV)** — **two-way** sync of your Nextcloud calendars.
+  **Agenda** and **month** views, per-calendar colour filters, and create / edit /
+  delete events (all-day or timed, location, notes). Cached on disk for instant
+  offline load, reconciled in the background by CTag with a manual refresh.
+- 👥 **Contacts (CardDAV)** — **two-way** sync of your address books. Searchable
+  list + detail pane; create / edit / delete contacts with multiple emails and
+  phone numbers, organization, title and notes. Edits are **lossless** — an
+  iCalendar/vCard content-line codec preserves properties the UI doesn't model
+  (recurrence rules, alarms, contact photos, custom `X-` fields), and writes are
+  guarded by **ETags** (`If-Match`) so a concurrent change never clobbers.
+- 🎵 **Inline audio playback** — click an audio file to play it in the bottom
+  **player bar**, which queues the folder's other tracks. Decoded through the
+  **Web Audio API** for clean, gapless playback; synced files play from the
+  local copy, the rest stream on demand. **Space** toggles play/pause anywhere.
+- 🔔 **Desktop notifications** on sync errors and new conflicts.
+- 🚀 **Autostart** — start on login minimized to the tray (toggle in Overview
+  or the tray menu).
+- 🌗 **Light / dark / system theme** — a switch in **Overview → Appearance**
+  (persisted); "System" follows the Plasma/OS colour scheme. Subtle animations
+  with reduced-motion support. Icons by [Lucide](https://lucide.dev).
+- 🧩 **Plasma 6 widget** — shows live sync state in your panel.
+
+## Installation
+
+Cirrust ships three ways — an **AppImage** (any distro), a **Flatpak**
+(sandboxed), or a **native build from source**. Grab the AppImage from the
+GitHub **Releases** page; the Flatpak and native builds you produce yourself.
+(No `.deb`/`.rpm` packages are provided.)
+
+### AppImage — any distro, no installation
+
+```bash
+chmod +x Cirrust_*.AppImage
+./Cirrust_*.AppImage
+```
+
+Works on every distro (WebKitGTK is bundled). Notes:
+- Some minimal distros lack `libfuse2`; either install it or run with
+  `--appimage-extract-and-run`.
+- Music/video playback uses the **host's** GStreamer codecs — for MP3/AAC on a
+  fresh system install your distro's `gst-plugins-good/bad/ugly` + `gst-libav`.
+- Optional: use a tool like *Gear Lever* or `appimaged` for menu integration.
+
+### Flatpak (sandboxed)
+
+```bash
+cd app && npm run tauri build     # produces the bundle the manifest wraps
+packaging/flatpak/build.sh        # builds + installs; needs flatpak-builder
+flatpak run org.cirrust.client
+```
+
+### Native (build from source — any distro)
+
+The best desktop integration. Install the
+[Prerequisites](#prerequisites-manjaro--arch), then:
+
+```bash
+git clone https://github.com/rimseg/cirrust.git
+cd cirrust/app
+npm install
+npm run tauri build               # binary → src-tauri/target/release/cirrust
+```
+
+Run it directly, or drop it on your `PATH`:
+
+```bash
+install -Dm755 src-tauri/target/release/cirrust ~/.local/bin/cirrust
+# desktop entry + icon (KDE/GNOME/Cinnamon menu integration):
+packaging/install-dev-desktop.sh
+```
+
+On Arch / Manjaro this is the recommended route.
+
+### Uninstall
+
+For a native install, `packaging/uninstall.sh` removes the binary, desktop entry,
+autostart entry and icons (and refreshes the desktop/icon caches):
+
+```bash
+packaging/uninstall.sh           # remove the app, keep settings & data
+packaging/uninstall.sh --purge   # also remove config, cache, sync/PIM data & the keyring password
+```
+
+Synced *file* folders on disk are never touched. AppImage/Flatpak installs are
+removed the way you added them (delete the `.AppImage`, or
+`flatpak uninstall org.cirrust.client`). Panel widgets are separate — the script
+prints the exact removal command for KDE/GNOME/Cinnamon.
+
+### Desktop-environment integrations
+
+The app itself runs on any desktop (GTK + freedesktop standards: tray via
+StatusNotifier, Secret Service keyring, XDG autostart/notifications). Panel
+status widgets are provided per environment — all speak to the same D-Bus
+service (`org.cirrust.client.Daemon`):
+
+| Environment | Integration |
+|---|---|
+| **KDE Plasma 6** | `cd widget && kpackagetool6 --type Plasma/Applet --install package` |
+| **GNOME** | `cp -r integrations/gnome-shell/cirrust@cirrust.app ~/.local/share/gnome-shell/extensions/` then enable in the Extensions app (log out/in first). Tray icon additionally needs the AppIndicator extension. |
+| **Cinnamon** | `cp -r integrations/cinnamon/cirrust@cirrust.app ~/.local/share/cinnamon/applets/` then add via panel → Applets |
+| **XFCE / MATE / Budgie / LXQt** | no extra piece needed — the status-badged tray icon covers it |
+| **sway / hyprland / i3** | use a bar with a StatusNotifier tray module (e.g. waybar) |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐        ┌──────────────────┐
+│  app/  (Tauri v2 desktop app)                │        │ widget/          │
+│                                              │        │ Plasma 6 plasmoid│
+│  ┌────────────┐   invoke/   ┌─────────────┐  │ D-Bus  │ (QML)            │
+│  │ Vue 3 + TS │ ──────────► │ Rust backend│ ◄┼────────┤ sync status +    │
+│  │ Tailwind v4│ ◄────────── │             │  │        │ "sync now"       │
+│  └────────────┘   events    │ auth·webdav │  │        └──────────────────┘
+│   file browser              │ sync · pim  │  │
+│   cal·contacts              └──────┬──────┘  │
+│                                    │ WebDAV  │
+└────────────────────────────────────┼─────────┘
+                                     ▼
+                            Nextcloud server
+```
+
+- **Frontend** (`app/src`): Vue 3, Pinia stores, Vue Router, Tailwind v4.
+  All backend calls go through the typed layer in `app/src/api`.
+- **Backend** (`app/src-tauri/src`): Rust. Key modules —
+  - `auth.rs` — Login Flow v2 + keyring credential storage
+  - `webdav.rs` — WebDAV client (PROPFIND/GET/PUT/COPY/MOVE/DELETE/MKCOL,
+    ranged GET, OCS helpers, thumbnails)
+  - `sync/` — bidirectional engine, journal, watcher, progress, D-Bus service
+  - `pim/` — **CalDAV/CardDAV** (calendars, events, address books, contacts):
+    a lossless iCal/vCard content-line codec, generic DAV verbs, per-account
+    JSON cache, two-way create/update/delete
+  - `media.rs` — local-first media resolution (synced copy → cache download)
+  - `mediahttp.rs` — loopback `http://127.0.0.1` media server that gives
+    `<video>` a real, seekable HTTP origin (WebKitGTK can't seek custom schemes)
+  - `stream.rs` — Range-capable `stream://` protocol for image/PDF previews
+  - `sharing.rs` / `trash.rs` / `dashboard.rs` — OCS shares, trashbin, quota
+  - `state.rs` / `config.rs` — session + persistent config
+- The app keeps running in the **system tray** so background sync continues
+  after the window is closed.
+
+## Prerequisites (Manjaro / Arch)
+
+```bash
+# Rust toolchain (required to build the backend)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Tauri / WebKitGTK build + runtime deps
+sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file \
+  openssl appmenu-gtk-module librsvg
+
+# System-tray backend (REQUIRED — the app panics at startup without it:
+#   "Failed to load ayatana-appindicator3 ... libayatana-appindicator3.so.1")
+sudo pacman -S --needed libayatana-appindicator
+
+# Audio codecs for the music player (WebKitGTK uses GStreamer)
+sudo pacman -S --needed gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
+
+# KWallet Secret Service (for credential storage) is part of Plasma already.
+```
+
+Node 20+ and npm are also required (already present on this system).
+
+## Running
+
+```bash
+cd app
+npm install
+npm run tauri dev      # dev build with hot reload
+npm run tauri build    # production build (AppImage + internal .deb)
+```
+
+## Building release bundles
+
+```bash
+cd app && NO_STRIP=1 npm run tauri build
+```
+
+produces the bundles under `app/src-tauri/target/release/bundle/`: the
+**AppImage** (the universal, shipped artifact) and a **.deb** that is used
+**only** as the input the Flatpak manifest wraps (`packaging/flatpak/build.sh`)
+— it isn't published as a package. `.rpm` is not built. Configure targets in
+`app/src-tauri/tauri.conf.json` (`bundle.targets`).
+
+> `NO_STRIP=1` is required on rolling-release distros: linuxdeploy's bundled
+> `strip` cannot handle modern `.relr.dyn` ELF sections and the AppImage
+> bundling fails without it.
+
+The GitHub Actions workflow in `.github/workflows/release.yml` builds and
+attaches the **AppImage** to a draft release on every `v*` tag push.
+
+### Building with Docker (no local toolchain needed)
+
+If you don't want Rust/Node/WebKitGTK on your machine, build inside a
+container — works from any distro:
+
+```bash
+DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose run --rm build
+# → bundles appear in ./dist/bundle/ (AppImage + the Flatpak-input .deb)
+```
+
+The image (see `packaging/docker/Dockerfile.build`) is based on Ubuntu 22.04
+on purpose: AppImages inherit the build system's glibc, so an older LTS base
+maximizes compatibility. Cargo and npm caches persist in named volumes, so
+rebuilds are incremental.
+
+> Note: Docker is only used to **build**. The app itself is a desktop-session
+> program (tray, session D-Bus, KWallet, audio) and is not meant to run in a
+> container — install the resulting bundle instead.
+
+## Security
+
+- Credentials: only the Login Flow v2 **app password** is stored, in the OS
+  keyring (KWallet/Secret Service) — never in config files or logs.
+- A strict **CSP** is enforced in the webview; no `v-html`/`eval` in the
+  frontend; Tauri capabilities are limited to the plugins actually used.
+- The `stream://` protocol only proxies WebDAV requests with the logged-in
+  user's own credentials (no privilege beyond the UI itself).
+- TLS trusts the **system certificate store** (`rustls-tls-native-roots`).
+
+### Verified against a live Nextcloud
+
+The client is tested end-to-end against a real Nextcloud server (`cargo
+test ... -- --ignored`): WebDAV round-trip incl. rename (`live_roundtrip`),
+bidirectional sync with deletion propagation + idempotency (`live_sync`),
+ranged GET (`live_range`), OCS quota/status (`live_ocs`), share
+create/list/revoke (`live_share`), trash delete→restore (`live_trash`) and
+music-tag indexing on real files (`live_index`).
+
+Run them with credentials in the environment:
+
+```bash
+cd app/src-tauri
+NC_URL=https://your.server NC_USER=you NC_PASS=app-password \
+  cargo test live_ -- --ignored --nocapture
+```
+
+> **TLS note:** the client trusts the **system certificate store**
+> (`rustls-tls-native-roots`), so self-hosted servers with an internal/company
+> CA validate correctly (as long as that CA is installed system-wide, like
+> `curl` uses).
+
+### Plasma widget ↔ app (phase 5)
+
+The backend serves a session D-Bus interface `org.cirrust.client.Sync` at
+`/Sync` (`Status()`, `SyncNow()`, `Open()`). The widget polls `Status()` and
+calls the others via `gdbus` (through a Plasma executable DataSource). Try it
+while the app is running:
+
+```bash
+gdbus call --session --dest org.cirrust.client.Daemon \
+  --object-path /Sync --method org.cirrust.client.Sync.Status
+```
+
+### Sync engine (phase 3)
+
+A journaled, **bidirectional** engine (`src-tauri/src/sync/`):
+
+- Three-way diff (remote ETag vs. local size/mtime vs. a per-folder **journal**)
+  classifies each path as upload / download / delete-local / delete-remote /
+  conflict. Deletions propagate both ways.
+- **Conflicts** (both sides changed) keep the local edit as
+  `name (conflicted copy DATE).ext` and take the server's version — matching the
+  official client.
+- Runs on startup, every 60s, on demand (`sync_now` / tray / widget), and
+  reacts to local changes via an **inotify** watcher (`notify` crate, debounced).
+- Live `SyncStatus` is pushed to the UI (`sync://status` event) and to the
+  Plasma widget over D-Bus.
+- Runs in the background via the tray after the window is closed.
+
+Files that exist with **identical content on both sides** (e.g. on the first
+sync of a folder that already lives on both ends) are adopted silently — only
+genuinely diverging content produces a conflict. Known v1 limit:
+empty-directory deletions aren't propagated.
+
+See `docs/ARCHITECTURE.md` for the command surface and design notes.

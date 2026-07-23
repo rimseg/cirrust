@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cirrust
+GenericName=Cloud Sync Client
+Comment=Browse, sync and play files from Nextcloud and compatible servers
+Exec=env GTK_CSD=0 cirrust %U
+Icon=org.cirrust.client
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+StartupWMClass=org.cirrust.client
+StartupNotify=true

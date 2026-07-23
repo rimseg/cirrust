@@ -1,0 +1,6 @@
+{
+  "uuid": "cirrust@cirrust.app",
+  "name": "Cirrust",
+  "description": "Sync status for the Cirrust desktop app: state icon in the panel, sync-now and open actions.",
+  "max-instances": 1
+}

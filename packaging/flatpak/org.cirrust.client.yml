@@ -1,0 +1,55 @@
+# Flatpak manifest for Cirrust.
+#
+# Wraps the .deb produced by `tauri build` (see packaging/flatpak/build.sh,
+# which stages it as cirrust.deb next to this manifest). The GNOME
+# runtime is used because it ships WebKitGTK 4.1 — the app's webview — so
+# nothing heavy needs bundling.
+
+app-id: org.cirrust.client
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+command: cirrust
+
+finish-args:
+  # Display + GPU
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Talk to the Nextcloud server
+  - --share=network
+  # Music/video playback
+  - --socket=pulseaudio
+  # Tray icon (StatusNotifier), keyring, notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  # The widget talks to the app's own D-Bus service
+  - --own-name=org.cirrust.client.Daemon
+  - --own-name=org.cirrust.client
+  # Folder sync needs access to the user's chosen directories
+  - --filesystem=home
+
+modules:
+  - name: cirrust
+    buildsystem: simple
+    build-commands:
+      # Unpack the deb (data tarball may be gz, xz or zst).
+      - ar x cirrust.deb
+      - tar xf data.tar.*
+      # Binary — normalize whatever name the bundler chose.
+      - install -Dm755 usr/bin/* /app/bin/
+      - sh -c 'b=$(ls usr/bin | head -1); [ "$b" = cirrust ] || ln -sf "/app/bin/$b" /app/bin/cirrust'
+      # Desktop entry + icons must be renamed to the flatpak app-id.
+      - sh -c 'd=$(ls usr/share/applications/*.desktop | head -1);
+        sed -e "s|^Exec=.*|Exec=cirrust %U|" -e "s|^Icon=.*|Icon=org.cirrust.client|" "$d"
+        > org.cirrust.client.desktop'
+      - install -Dm644 org.cirrust.client.desktop /app/share/applications/org.cirrust.client.desktop
+      - sh -c 'for i in usr/share/icons/hicolor/*/apps/*.png; do
+        s=$(basename $(dirname $(dirname "$i")));
+        install -Dm644 "$i" "/app/share/icons/hicolor/$s/apps/org.cirrust.client.png";
+        done'
+    sources:
+      - type: file
+        path: cirrust.deb

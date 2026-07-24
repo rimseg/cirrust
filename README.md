@@ -18,8 +18,8 @@ Plasma, which is the most polished target but not a requirement.
 > compatibility.
 
 <p align="center">
-  <img src="docs/images/overview.png" width="900"
-       alt="The Cirrust Overview view split diagonally — light theme in the lower left, dark theme in the upper right — showing sync status, storage quota and synced folders">
+  <img src="docs/images/hero.png" width="920"
+       alt="The Cirrust Overview in the centre, split by a wave into light theme on the lower left and dark theme on the upper right, with four further windows peeking out from behind it: the file browser and the contact list in the light theme on the left, the calendar month grid and the image gallery in the dark theme on the right">
 </p>
 
 ## Features

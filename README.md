@@ -338,7 +338,13 @@ A journaled, **bidirectional** engine (`src-tauri/src/sync/`):
 
 Files that exist with **identical content on both sides** (e.g. on the first
 sync of a folder that already lives on both ends) are adopted silently — only
-genuinely diverging content produces a conflict. Known v1 limit:
-empty-directory deletions aren't propagated.
+genuinely diverging content produces a conflict.
+
+**Known limit — deleting a folder that still held files.** The files are removed
+on the other side, but the now-empty folder is left behind on both ends. The
+journal stores the remote folder's ETag, and uploading a file into it had
+already changed that ETag, so on deletion the folder no longer looks untouched
+and gets re-created instead of removed. Deleting an *empty* folder does
+propagate in both directions — so deleting the leftover once finishes the job.
 
 See `docs/ARCHITECTURE.md` for the command surface and design notes.

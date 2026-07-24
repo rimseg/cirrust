@@ -19,7 +19,7 @@ Plasma, which is the most polished target but not a requirement.
 
 <p align="center">
   <img src="docs/images/overview.png" width="900"
-       alt="The Cirrust Overview view in dark theme: sync status, storage quota and synced folders">
+       alt="The Cirrust Overview view split diagonally — light theme in the lower left, dark theme in the upper right — showing sync status, storage quota and synced folders">
 </p>
 
 ## Features

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.4 — 2026-07-24
+
+A GNOME-integration and documentation release. The desktop app itself is
+unchanged from 0.1.3 — the AppImage is functionally identical. This exists so
+that installing from a release no longer hands GNOME users a broken indicator.
+
+- **GNOME Shell 50**: the extension declared `shell-version` up to 49, and Shell
+  refuses to load anything that does not list the running version — so on GNOME
+  50 the indicator did not appear at all. Now declared through 50 and verified on
+  a real Shell 50.3 (`State: ACTIVE`, no JS exceptions).
+- **GNOME indicator icons**: `adwaita-icon-theme` 50 dropped
+  `emblem-default-symbolic` and `emblem-synchronizing-symbolic`, and
+  `adwaita-icon-theme-legacy` does not supply them either, so the panel icon
+  rendered blank in the *idle* and *syncing* states — almost always. Replaced
+  with `object-select-symbolic` and `view-refresh-symbolic`.
+- Renamed the extension's two leftover pre-rename classes to
+  `CirrustIndicator` / `CirrustExtension`. No behaviour change.
+- **Documentation corrections**, each checked against the code: dropped a claimed
+  `live_index` test and "music-tag indexing" that do not exist; corrected three
+  live-test names; "the sidebar shows a live speed readout" → the top bar (there
+  is no sidebar); removed "thumbnails" from the `webdav.rs` description. Also
+  dropped two roadmap phase numbers that referred to a plan not in this repo.
+- **Corrected the folder-deletion limit**, which was documented backwards.
+  Measured against a live server: deleting an *empty* folder propagates in both
+  directions; the actual limit is deleting a folder that still held files — its
+  files are removed on the other side, but the now-empty folder is left behind
+  and re-created. Deleting the leftover once finishes the job.
+- New README image: the Overview split by a wave into light and dark, with four
+  further views peeking out from behind it. All screenshots were retaken against
+  a throwaway demo server — the previous one exposed a real account name, an
+  internal hostname and local paths.
+
 ## 0.1.3 — 2026-07-23
 
 - **First-play freeze**: the first audio track or video after launch stalled the

@@ -30,7 +30,7 @@ const STATE_ICONS = {
 };
 
 const Indicator = GObject.registerClass(
-class NextcloudVueClientIndicator extends PanelMenu.Button {
+class CirrustIndicator extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'Cirrust');
 
@@ -110,7 +110,7 @@ class NextcloudVueClientIndicator extends PanelMenu.Button {
     }
 });
 
-export default class NextcloudVueClientExtension extends Extension {
+export default class CirrustExtension extends Extension {
     enable() {
         this._indicator = new Indicator();
         Main.panel.addToStatusArea(this.uuid, this._indicator);

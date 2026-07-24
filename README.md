@@ -308,7 +308,7 @@ NC_URL=https://your.server NC_USER=you NC_PASS=app-password \
 > CA validate correctly (as long as that CA is installed system-wide, like
 > `curl` uses).
 
-### Plasma widget ↔ app (phase 5)
+### Plasma widget ↔ app
 
 The backend serves a session D-Bus interface `org.cirrust.client.Sync` at
 `/Sync` (`Status()`, `SyncNow()`, `Open()`). The widget polls `Status()` and
@@ -320,7 +320,7 @@ gdbus call --session --dest org.cirrust.client.Daemon \
   --object-path /Sync --method org.cirrust.client.Sync.Status
 ```
 
-### Sync engine (phase 3)
+### Sync engine
 
 A journaled, **bidirectional** engine (`src-tauri/src/sync/`):
 

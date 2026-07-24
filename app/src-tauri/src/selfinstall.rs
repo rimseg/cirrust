@@ -15,6 +15,10 @@ use std::process::Command;
 const APP_ID: &str = "org.cirrust.client";
 const BIN_NAME: &str = "cirrust";
 
+/// This build's version — compared against the installed copy's recorded
+/// version to decide whether to offer an update.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Icons embedded at compile time, so installing never depends on the AppImage's
 /// mount layout being present. Sizes mirror `packaging/install-dev-desktop.sh`.
 const ICONS: &[(u32, &[u8])] = &[
@@ -67,6 +71,50 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Records the version of the currently installed copy.
+fn version_marker() -> Option<PathBuf> {
+    data_home().map(|d| d.join(APP_ID).join(".installed-version"))
+}
+
+/// Records that the user declined *updating to* a specific version.
+fn update_declined_marker() -> Option<PathBuf> {
+    data_home().map(|d| d.join(APP_ID).join(".update-declined"))
+}
+
+/// Version recorded for the installed copy. `None` if never recorded (e.g. an
+/// install predating this marker) — treated as older than any real version.
+fn installed_version() -> Option<String> {
+    version_marker()
+        .and_then(|m| fs::read_to_string(m).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse `MAJOR.MINOR.PATCH` into a comparable tuple. Missing minor/patch pad to
+/// zero, but a *present* component that is not a number yields `None` — a
+/// malformed version should not be silently treated as a valid one.
+fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.trim().parse::<u32>().ok()?;
+    let component = |p: Option<&str>| -> Option<u32> {
+        match p {
+            Some(s) => s.trim().parse::<u32>().ok(),
+            None => Some(0),
+        }
+    };
+    let minor = component(parts.next())?;
+    let patch = component(parts.next())?;
+    Some((major, minor, patch))
+}
+
+/// True when `running` is a strictly newer version than `installed`.
+fn is_newer(running: &str, installed: &str) -> bool {
+    match (parse_version(running), parse_version(installed)) {
+        (Some(r), Some(i)) => r > i,
+        _ => false,
+    }
+}
+
 /// Whether to offer self-install: running from an AppImage that is not already
 /// the installed copy, with nothing installed yet and no prior decline.
 pub fn should_offer_install() -> bool {
@@ -80,6 +128,40 @@ pub fn should_offer_install() -> bool {
         return false; // already the installed copy, or something is installed
     }
     !declined_marker().map_or(false, |m| m.exists())
+}
+
+/// Whether to offer to *update* the installed copy: running from an AppImage
+/// that is newer than the installed one (and is not that installed copy), with
+/// no prior decline for this exact version. An install with no recorded version
+/// (predating the marker) counts as older, so it is offered the update once.
+pub fn should_offer_update() -> bool {
+    let Some(appimage) = appimage_path() else {
+        return false;
+    };
+    let Some(target) = target_bin() else {
+        return false;
+    };
+    if same_file(&appimage, &target) || !target.exists() {
+        return false; // running the installed copy, or nothing installed
+    }
+    if !is_newer(VERSION, &installed_version().unwrap_or_else(|| "0.0.0".into())) {
+        return false;
+    }
+    // Not already declined for this exact version.
+    let declined = update_declined_marker()
+        .and_then(|m| fs::read_to_string(m).ok())
+        .map(|s| s.trim().to_string());
+    declined.as_deref() != Some(VERSION)
+}
+
+/// Remember that the user declined updating to this version.
+pub fn mark_update_declined() {
+    if let Some(m) = update_declined_marker() {
+        if let Some(dir) = m.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&m, VERSION.as_bytes());
+    }
 }
 
 /// Copy the AppImage to `~/.local/bin`, write the desktop entry and icons.
@@ -138,6 +220,18 @@ pub fn install() -> std::io::Result<PathBuf> {
         }
     }
 
+    // 4. Record the installed version so a later, newer AppImage can offer an
+    //    update; clear any stale "declined update" marker.
+    if let Some(m) = version_marker() {
+        if let Some(dir) = m.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&m, VERSION.as_bytes())?;
+    }
+    if let Some(m) = update_declined_marker() {
+        let _ = fs::remove_file(m);
+    }
+
     refresh_desktop_db();
     Ok(target)
 }
@@ -165,7 +259,10 @@ pub fn uninstall() -> std::io::Result<()> {
     if let Some(cfg) = config_home() {
         let _ = fs::remove_file(cfg.join("autostart").join("Cirrust.desktop"));
     }
-    if let Some(m) = declined_marker() {
+    for m in [declined_marker(), version_marker(), update_declined_marker()]
+        .into_iter()
+        .flatten()
+    {
         let _ = fs::remove_file(&m);
     }
     refresh_desktop_db();
@@ -187,5 +284,31 @@ fn refresh_desktop_db() {
         let _ = Command::new("update-desktop-database")
             .arg(data.join("applications"))
             .status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_newer, parse_version};
+
+    #[test]
+    fn parses_and_pads() {
+        assert_eq!(parse_version("0.1.5"), Some((0, 1, 5)));
+        assert_eq!(parse_version("1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_version("2"), Some((2, 0, 0)));
+        assert_eq!(parse_version("nope"), None);
+        assert_eq!(parse_version("0.1.x"), None);
+    }
+
+    #[test]
+    fn newer_compares_numerically_not_lexically() {
+        assert!(is_newer("0.1.5", "0.1.4"));
+        assert!(is_newer("0.2.0", "0.1.9"));
+        // The lexical trap: "0.1.10" < "0.1.9" as strings, but 10 > 9.
+        assert!(is_newer("0.1.10", "0.1.9"));
+        assert!(!is_newer("0.1.5", "0.1.5")); // equal is not newer
+        assert!(!is_newer("0.1.4", "0.1.5")); // older
+        assert!(is_newer("0.1.5", "0.0.0")); // unrecorded install migrates
+        assert!(!is_newer("bad", "0.1.5")); // unparseable -> do not offer
     }
 }

@@ -223,6 +223,38 @@ pub fn run() {
                             });
                         });
                 }
+
+                // Newer AppImage than the installed copy: offer to update it.
+                // Declining is remembered per version, so it asks again only for
+                // the next release. (The installed copy must not be running, or
+                // the single-instance guard would have deferred this launch.)
+                #[cfg(target_os = "linux")]
+                if selfinstall::should_offer_update() {
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                    app.dialog()
+                        .message(
+                            "A newer version of Cirrust is running than the one installed in \
+                             your applications menu. Update the installed copy?",
+                        )
+                        .title("Update Cirrust?")
+                        .kind(MessageDialogKind::Info)
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "Update".into(),
+                            "Not now".into(),
+                        ))
+                        .show(|update| {
+                            std::thread::spawn(move || {
+                                if update {
+                                    match selfinstall::install() {
+                                        Ok(p) => log::info!("updated installed copy at {}", p.display()),
+                                        Err(e) => log::warn!("self-update failed: {e}"),
+                                    }
+                                } else {
+                                    selfinstall::mark_update_declined();
+                                }
+                            });
+                        });
+                }
             }
 
             // Start the sync engine up front so `sync_*` commands always have a

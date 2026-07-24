@@ -9,6 +9,8 @@ mod media;
 mod mediahttp;
 mod pim;
 mod sharing;
+#[cfg(target_os = "linux")]
+mod selfinstall;
 mod state;
 mod stream;
 mod sync;
@@ -31,6 +33,24 @@ static TRAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // AppImage self-install CLI flags: handle and exit before starting the app.
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|a| a == "--uninstall") {
+        match selfinstall::uninstall() {
+            Ok(()) => println!("Cirrust removed from ~/.local/bin and the applications menu."),
+            Err(e) => eprintln!("uninstall failed: {e}"),
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|a| a == "--install") {
+        match selfinstall::install() {
+            Ok(p) => println!("Cirrust installed to {}", p.display()),
+            Err(e) => eprintln!("install failed: {e}"),
+        }
+        return;
+    }
+
     // Slim native KDE (Breeze) title bar instead of GTK's thick client-side
     // decoration. On Wayland GTK forces CSD and KWin can't override it, so run
     // the webview on XWayland where KWin draws the server-side title bar;
@@ -171,6 +191,37 @@ pub fn run() {
             if !std::env::args().any(|a| a == "--hidden") {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
+                }
+
+                // First run from an AppImage: offer to install into the menu.
+                // The offer is shown once; declining suppresses it thereafter.
+                #[cfg(target_os = "linux")]
+                if selfinstall::should_offer_install() {
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                    app.dialog()
+                        .message(
+                            "Add Cirrust to your applications menu? It will keep a copy in \
+                             ~/.local/bin so it starts from the menu, the tray and on login.",
+                        )
+                        .title("Install Cirrust?")
+                        .kind(MessageDialogKind::Info)
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "Install".into(),
+                            "Not now".into(),
+                        ))
+                        .show(|install| {
+                            // File work (a ~180 MB copy) off the UI thread.
+                            std::thread::spawn(move || {
+                                if install {
+                                    match selfinstall::install() {
+                                        Ok(p) => log::info!("self-installed to {}", p.display()),
+                                        Err(e) => log::warn!("self-install failed: {e}"),
+                                    }
+                                } else {
+                                    selfinstall::mark_declined();
+                                }
+                            });
+                        });
                 }
             }
 

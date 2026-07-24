@@ -19,10 +19,13 @@ const OBJECT_PATH = '/Sync';
 const INTERFACE = 'org.cirrust.client.Sync';
 const POLL_SECONDS = 3;
 
-// Adwaita symbolic icons per sync state.
+// Adwaita symbolic icons per sync state. Keep to names that still ship in
+// current adwaita-icon-theme: `emblem-default-symbolic` and
+// `emblem-synchronizing-symbolic` were dropped by GNOME 50 (not even in
+// adwaita-icon-theme-legacy), which left the two most common states blank.
 const STATE_ICONS = {
-    idle: 'emblem-default-symbolic',
-    syncing: 'emblem-synchronizing-symbolic',
+    idle: 'object-select-symbolic',
+    syncing: 'view-refresh-symbolic',
     paused: 'media-playback-pause-symbolic',
     error: 'dialog-error-symbolic',
     offline: 'network-offline-symbolic',

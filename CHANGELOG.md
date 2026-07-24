@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5 — 2026-07-24
+
+- **Self-installing AppImage**: on the first run from an AppImage, Cirrust now
+  offers — via a one-time dialog — to add itself to your applications menu. If you
+  accept, it copies itself to `~/.local/bin/cirrust` and registers a desktop
+  entry and icons, so it launches from the menu, the tray and (via the in-app
+  "Start on login" toggle) at login, all pointing at a stable path rather than the
+  AppImage's temporary mount. Declining is remembered and not asked again. New
+  `--install` / `--uninstall` flags do the same non-interactively; `--uninstall`
+  also removes the autostart entry.
+- **Login screen** now shows the Cirrust brand mark instead of a generic cloud
+  glyph, matching the app icon and favicon.
+
 ## 0.1.4 — 2026-07-24
 
 A GNOME-integration and documentation release. The desktop app itself is

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6 — 2026-07-24
+
+- **Self-updating AppImage**: the self-install from 0.1.5 was first-run only —
+  once a copy existed in `~/.local/bin`, a newer AppImage neither prompted nor
+  replaced it. Now the installed copy records its version, and a newer AppImage
+  offers — via a one-time dialog — to update it. Declining is remembered per
+  version, so it only asks again for the next release. An install predating this
+  is offered the update once. `--install` still overwrites unconditionally.
+  (Updating via the prompt needs the installed copy not to be running, or the
+  single-instance guard defers the new launch before the dialog appears;
+  `--install` is unaffected.)
+
 ## 0.1.5 — 2026-07-24
 
 - **Self-installing AppImage**: on the first run from an AppImage, Cirrust now

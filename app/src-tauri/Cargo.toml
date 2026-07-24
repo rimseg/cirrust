@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.5"
+version = "0.1.6"
 description = "Cirrust — an unofficial desktop sync client for Nextcloud and compatible WebDAV servers"
 authors = ["rimseg <dev@wnzke.de>"]
 license = "MIT"

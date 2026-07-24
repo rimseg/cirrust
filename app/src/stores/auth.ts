@@ -82,7 +82,7 @@ export const useAuthStore = defineStore("auth", () => {
     await refresh();
   }
 
-  /** Sidebar "Log out": disconnect the account currently being browsed. */
+  /** Top-bar account menu "Disconnect": drops the account currently browsed. */
   async function logout() {
     if (account.value) await removeAccount(account.value.id);
   }

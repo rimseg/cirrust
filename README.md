@@ -45,7 +45,7 @@ Plasma, which is the most polished target but not a requirement.
 - **Live sync observability** — see the current file, per-file and overall
   progress bars, transfer **speed**, files/bytes done vs. total, and a recent
   **activity feed** (uploads/downloads/deletions/conflicts/errors). Downloads
-  stream with live byte progress; the sidebar shows a live speed readout.
+  stream with live byte progress; the top bar shows a live speed readout.
 - **Sync controls** — global + per-folder pause/resume, ignore patterns
   (`*.tmp`, `node_modules`, …), and conflict resolution (keep mine / keep server).
 - **Account overview** — storage quota/usage, account + server info, and the
@@ -180,7 +180,7 @@ service (`org.cirrust.client.Daemon`):
 - **Backend** (`app/src-tauri/src`): Rust. Key modules —
   - `auth.rs` — Login Flow v2 + keyring credential storage
   - `webdav.rs` — WebDAV client (PROPFIND/GET/PUT/COPY/MOVE/DELETE/MKCOL,
-    ranged GET, OCS helpers, thumbnails)
+    ranged GET, OCS helpers)
   - `sync/` — bidirectional engine, journal, watcher, progress, D-Bus service
   - `pim/` — **CalDAV/CardDAV** (calendars, events, address books, contacts):
     a lossless iCal/vCard content-line codec, generic DAV verbs, per-account
@@ -290,10 +290,10 @@ incremental.
 
 The client is tested end-to-end against a real Nextcloud server (`cargo
 test ... -- --ignored`): WebDAV round-trip incl. rename (`live_roundtrip`),
-bidirectional sync with deletion propagation + idempotency (`live_sync`),
-ranged GET (`live_range`), OCS quota/status (`live_ocs`), share
-create/list/revoke (`live_share`), trash delete→restore (`live_trash`) and
-music-tag indexing on real files (`live_index`).
+bidirectional sync with deletion propagation + idempotency
+(`live_sync_bidirectional`), ranged GET (`live_range`), OCS quota/status
+(`live_ocs_user`), share create/list/revoke (`live_share`) and trash
+delete→restore (`live_trash_roundtrip`).
 
 Run them with credentials in the environment:
 

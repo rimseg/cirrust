@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { useAuthStore } from "../stores/auth";
 import type { ServerKind } from "../api/types";
-import { Cloud, Globe, KeyRound, ChevronLeft } from "lucide-vue-next";
+import { Globe, KeyRound, ChevronLeft } from "lucide-vue-next";
 
 const authStore = useAuthStore();
 const { status, error, accounts } = storeToRefs(authStore);
@@ -62,7 +62,13 @@ watch(
 
       <div class="mb-6 text-center">
         <div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-accent text-white">
-          <Cloud class="h-8 w-8" />
+          <!-- Cirrust brand mark (matches the app icon / favicon), not a
+               generic cloud glyph. -->
+          <svg class="h-8 w-8" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
+            <path d="M10 11q4-1.6 9 0" />
+            <path d="M7 16.5q6.5-2.2 17 0" />
+            <path d="M11 22q4-1.4 8.5 0" />
+          </svg>
         </div>
         <h1 class="text-xl font-semibold text-ink">
           {{ canGoBack() ? "Add an account" : "Connect your cloud" }}

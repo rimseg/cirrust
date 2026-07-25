@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.7 — 2026-07-24
+
+- **Folder deletion now propagates when the folder held files.** Deleting a
+  folder that contained files used to remove the files on the other side but
+  leave an empty ghost folder that kept coming back — a directory's ETag changes
+  whenever its contents do, so the folder looked "modified" and was re-created
+  instead of removed. The sync engine now decides directory deletion by whether
+  it knew the folder, not by its ETag, and only removes a remote folder once it
+  is actually empty — so a file added on the far side after you deleted the
+  folder is preserved rather than swept away.
+- Testing: a live sync/PIM test suite (`packaging/live-tests.sh`) that runs the
+  full reconcile matrix — file create/modify/delete, every conflict path,
+  directory deletion (empty and non-empty), nested trees, ignore patterns — plus
+  CalDAV/CardDAV round-trips with ETag-guarded writes, against a throwaway
+  Nextcloud. Run green before each release.
+
 ## 0.1.6 — 2026-07-24
 
 - **Self-updating AppImage**: the self-install from 0.1.5 was first-run only —

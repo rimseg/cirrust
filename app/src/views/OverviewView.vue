@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
 import { storeToRefs } from "pinia";
@@ -200,6 +200,7 @@ async function pickLocal() {
 const browsePath = ref("/");
 const browseDirs = ref<FileEntry[]>([]);
 const browseLoading = ref(false);
+const browseError = ref<string | null>(null);
 const addingRemote = ref<string | null>(null);
 
 function cleanRemote(path: string): string {
@@ -208,13 +209,25 @@ function cleanRemote(path: string): string {
 
 async function loadBrowse(path: string) {
   browseLoading.value = true;
+  browseError.value = null;
   try {
     browsePath.value = cleanRemote(path);
     browseDirs.value = (await files.list(path)).filter((e) => e.isDir);
+  } catch (e) {
+    // Surface the failure instead of quietly showing a list with no server
+    // folders — that made synced folders look like they only existed locally.
+    browseError.value = (e as { message?: string })?.message ?? String(e);
   } finally {
     browseLoading.value = false;
   }
 }
+
+// The view can mount before the backend has restored the session (or while
+// the server is briefly unreachable) — reload the listing once the account
+// is actually available instead of staying silently empty.
+watch(activeAccount, (a) => {
+  if (a && browseDirs.value.length === 0) loadBrowse(browsePath.value);
+});
 
 function browseUp() {
   const p = browsePath.value.replace(/\/+$/, "");
@@ -701,10 +714,24 @@ onMounted(async () => {
               <RefreshCw class="h-4 w-4" />
             </button>
           </div>
+          <div
+            v-if="browseError"
+            class="mt-2 flex items-center justify-between gap-3 rounded-lg bg-warning/10 px-3 py-2 text-xs text-warning"
+          >
+            <span class="min-w-0 truncate">
+              Couldn't load the server folder list — {{ browseError }}
+            </span>
+            <button
+              class="shrink-0 rounded-lg border border-warning/40 px-2.5 py-1 text-warning hover:bg-warning/10"
+              @click="loadBrowse(browsePath)"
+            >
+              Retry
+            </button>
+          </div>
           <p v-if="browseLoading && folderRows.length === 0" class="py-2 text-xs text-ink-soft">
             Loading…
           </p>
-          <p v-else-if="folderRows.length === 0" class="py-2 text-xs text-ink-soft">
+          <p v-else-if="folderRows.length === 0 && !browseError" class="py-2 text-xs text-ink-soft">
             No folders yet — add one above, or create folders in your cloud.
           </p>
           <ul v-else class="divide-y divide-line">

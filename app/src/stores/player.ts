@@ -90,7 +90,14 @@ export const usePlayerStore = defineStore("player", () => {
     if (warmed) return;
     warmed = true;
     try {
-      await ensureCtx().decodeAudioData(silentWav());
+      // Decode on an OfflineAudioContext, not the real playback context: it
+      // renders to a buffer and never opens an audio output device, so the
+      // desktop doesn't show Cirrust as "playing audio" the whole time it's
+      // open. The GStreamer plugin-registry scan is process-wide and triggered
+      // by decoder instantiation, so this still warms the first audio *and*
+      // video. The real AudioContext is created lazily on the first play.
+      const offline = new OfflineAudioContext(1, 1, 8000);
+      await offline.decodeAudioData(silentWav());
     } catch {
       // The scan happens regardless of whether this trivial clip decodes.
     }

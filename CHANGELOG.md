@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.9 — 2026-07-25
 
 - **Fixed: sync could silently stop working until an app restart.** The OS
   keyring (Secret Service / KWallet) is driven over blocking D-Bus; calling it

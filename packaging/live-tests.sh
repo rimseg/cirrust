@@ -48,13 +48,22 @@ for _ in $(seq 1 90); do
 done
 $ready || { echo " TIMEOUT — Nextcloud did not come up"; exit 1; }
 
+# The CalDAV/CardDAV tests target the default `personal` calendar and `contacts`
+# addressbook; ensure they exist (occ errors harmlessly if they already do).
+echo "==> Ensuring default PIM collections"
+docker exec -u www-data "$name" php occ dav:create-addressbook "$admin" contacts >/dev/null 2>&1 || true
+docker exec -u www-data "$name" php occ dav:create-calendar "$admin" personal >/dev/null 2>&1 || true
+
 echo "==> Minting an app password"
 pw="$(docker exec -e OC_PASS="$adminpw" -u www-data "$name" \
   php occ user:add-app-password "$admin" --password-from-env | tail -1)"
 
 echo "==> Running live tests (cargo test live_ -- --ignored)"
+# Serial: the throwaway server runs on SQLite (single-writer), so concurrent
+# write-heavy tests would hit "database is locked". Real Nextcloud (MySQL/
+# Postgres) has no such limit; --test-threads=1 keeps the gate deterministic.
 cd "$repo/app/src-tauri"
 NC_URL="$url" NC_USER="$admin" NC_PASS="$pw" \
-  cargo test --lib live_ -- --ignored --nocapture
+  cargo test --lib live_ -- --ignored --nocapture --test-threads=1
 
 echo "==> Live tests PASSED"

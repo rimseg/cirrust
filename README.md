@@ -295,15 +295,27 @@ tests are `#[ignore]` by default (they need a reachable server) and cover:
   (`live_range`), OCS quota/status (`live_ocs_user`), share create/list/revoke
   (`live_share`), trash delete→restore (`live_trash_roundtrip`).
 - **Sync engine**, the full reconcile matrix: bidirectional file
-  create/modify/delete with deletion propagation + idempotency + identical-content
-  adoption (`live_sync_bidirectional`), one-sided edits both directions
-  (`live_file_modify`), diverging-edit conflict with a conflicted-copy
-  (`live_file_conflict`), empty-directory create/delete both ways
-  (`live_dir_empty`), **deleting a directory that held files**
+  create/modify/delete with deletion propagation + idempotency
+  (`live_sync_bidirectional`), one-sided edits both directions
+  (`live_file_modify`), and **conflicts** — diverging edits of different sizes
+  (`live_file_conflict_diff_size`), diverging edits of the *same* size that must
+  still conflict rather than silently adopt (`live_file_conflict_same_size`),
+  same-size identical content that *is* adopted (`live_file_same_size_identical_adopted`),
+  delete-vs-modify where the surviving edit wins (`live_delete_vs_modify`), and
+  pairing a folder that already holds identical content on both sides
+  (`live_first_sync_preexisting_identical`). Directories: empty create/delete both
+  ways (`live_dir_empty`), **deleting a directory that held files**
   (`live_dir_nonempty_delete`), a locally-deleted folder that gained a file
   remotely being preserved (`live_dir_preserve_remote_addition`), nested-tree
-  deletion (`live_dir_nested_delete`), and ignore patterns
-  (`live_ignore_patterns`).
+  deletion (`live_dir_nested_delete`), and ignore patterns (`live_ignore_patterns`).
+- **CalDAV / CardDAV**: create → read-back (custom `X-` properties preserved) →
+  ETag-guarded update → delete, with a stale-`If-Match` write correctly rejected
+  as a 412 so a concurrent change can't be clobbered (`live_caldav_crud`,
+  `live_carddav_crud`).
+
+The runner starts the throwaway server on SQLite and runs the suite serially
+(`--test-threads=1`), since SQLite is single-writer; a real Nextcloud on
+MySQL/Postgres has no such limit.
 
 **Before tagging a release, run the whole suite green.** The runner spins up a
 throwaway Nextcloud in Docker, runs the `live_*` tests and tears it down:

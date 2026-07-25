@@ -1211,34 +1211,111 @@ mod tests {
         println!("live_file_modify OK");
     }
 
-    /// A file edited differently on both sides: the local copy is kept as a
-    /// "conflicted copy" and the server's version is taken.
-    #[tokio::test]
-    #[ignore]
-    async fn live_file_conflict() {
-        let e = LiveEnv::new("conflict");
-        std::fs::write(e.lp("f.txt"), b"base").unwrap();
-        e.sync().await;
-
-        // Diverge on both sides (different sizes -> a genuine conflict, not the
-        // identical-content adoption path).
-        std::fs::write(e.lp("f.txt"), b"local side change").unwrap();
-        e.client.put_bytes(&e.rp("f.txt"), b"remote".to_vec()).await.unwrap();
-        let s = e.sync().await;
-        assert_eq!(s.conflicts, 1, "one conflict recorded");
-
-        // Server version wins for f.txt …
-        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"remote", "remote version taken");
-        // … and the local edit survives as a conflicted copy.
+    /// Asserts a diverging edit produced a conflict: the server version is taken
+    /// for `name`, and the local edit survives as a "conflicted copy" alongside.
+    async fn assert_conflicted(e: &LiveEnv, name: &str, remote_bytes: &[u8], local_bytes: &[u8]) {
+        assert_eq!(std::fs::read(e.lp(name)).unwrap(), remote_bytes, "remote version taken");
         let copy = std::fs::read_dir(&e.local)
             .unwrap()
             .filter_map(|x| x.ok())
             .find(|x| x.file_name().to_string_lossy().contains("conflicted copy"));
         assert!(copy.is_some(), "local edit preserved as a conflicted copy");
-        assert_eq!(std::fs::read(copy.unwrap().path()).unwrap(), b"local side change");
+        assert_eq!(std::fs::read(copy.unwrap().path()).unwrap(), local_bytes, "conflicted copy holds local edit");
+    }
+
+    /// Diverging edit, DIFFERENT sizes → the fast path (no content compare):
+    /// conflicted copy + server version.
+    #[tokio::test]
+    #[ignore]
+    async fn live_file_conflict_diff_size() {
+        let e = LiveEnv::new("conflictdiff");
+        std::fs::write(e.lp("f.txt"), b"base").unwrap();
+        e.sync().await;
+
+        std::fs::write(e.lp("f.txt"), b"local side change").unwrap(); // 17 bytes
+        e.client.put_bytes(&e.rp("f.txt"), b"remote".to_vec()).await.unwrap(); // 6 bytes
+        let s = e.sync().await;
+        assert_eq!(s.conflicts, 1, "one conflict recorded");
+        assert_conflicted(&e, "f.txt", b"remote", b"local side change").await;
 
         e.cleanup().await;
-        println!("live_file_conflict OK");
+        println!("live_file_conflict_diff_size OK");
+    }
+
+    /// Diverging edit, SAME size → the content-compare path. This is the subtle
+    /// boundary: same-size same-content is adopted silently, but same-size
+    /// DIFFERENT content must still be a conflict, not a silent adoption that
+    /// would quietly discard one side. Both edits are 8 bytes.
+    #[tokio::test]
+    #[ignore]
+    async fn live_file_conflict_same_size() {
+        let e = LiveEnv::new("conflictsame");
+        std::fs::write(e.lp("f.txt"), b"original").unwrap(); // 8 bytes
+        e.sync().await;
+
+        std::fs::write(e.lp("f.txt"), b"LOCALvvv").unwrap(); // 8 bytes
+        e.client.put_bytes(&e.rp("f.txt"), b"remotexx".to_vec()).await.unwrap(); // 8 bytes
+        let s = e.sync().await;
+        assert_eq!(s.conflicts, 1, "same-size divergence must still conflict, not adopt");
+        assert_conflicted(&e, "f.txt", b"remotexx", b"LOCALvvv").await;
+
+        e.cleanup().await;
+        println!("live_file_conflict_same_size OK");
+    }
+
+    /// Same size AND identical content on both sides is adopted silently — no
+    /// conflict, no conflicted copy. Complements the same-size divergence test.
+    #[tokio::test]
+    #[ignore]
+    async fn live_file_same_size_identical_adopted() {
+        let e = LiveEnv::new("adopt");
+        std::fs::write(e.lp("f.txt"), b"seed").unwrap();
+        e.sync().await;
+
+        // Identical 9-byte content written to both sides independently.
+        std::fs::write(e.lp("f.txt"), b"identical").unwrap();
+        e.client.put_bytes(&e.rp("f.txt"), b"identical".to_vec()).await.unwrap();
+        let s = e.sync().await;
+        assert_eq!(s.conflicts, 0, "identical content is not a conflict");
+        let has_copy = std::fs::read_dir(&e.local)
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .any(|x| x.file_name().to_string_lossy().contains("conflicted copy"));
+        assert!(!has_copy, "no conflicted copy for identical content");
+        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"identical");
+
+        e.cleanup().await;
+        println!("live_file_same_size_identical_adopted OK");
+    }
+
+    /// Delete-vs-modify: the surviving change wins over the deletion, both ways.
+    #[tokio::test]
+    #[ignore]
+    async fn live_delete_vs_modify() {
+        // (a) local edits, remote deletes -> local edit wins (file restored remotely)
+        let e = LiveEnv::new("delmod_a");
+        std::fs::write(e.lp("f.txt"), b"base").unwrap();
+        e.sync().await;
+        std::fs::write(e.lp("f.txt"), b"local-edit-wins").unwrap();
+        e.client.delete(&e.rp("f.txt")).await.unwrap();
+        e.sync().await;
+        assert!(e.r_exists("f.txt").await, "locally-edited file restored on the server");
+        assert_eq!(e.r_bytes("f.txt").await, b"local-edit-wins");
+        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"local-edit-wins");
+        e.cleanup().await;
+
+        // (b) local deletes, remote edits -> remote edit wins (file restored locally)
+        let e = LiveEnv::new("delmod_b");
+        std::fs::write(e.lp("f.txt"), b"base").unwrap();
+        e.sync().await;
+        std::fs::remove_file(e.lp("f.txt")).unwrap();
+        e.client.put_bytes(&e.rp("f.txt"), b"remote-edit-wins".to_vec()).await.unwrap();
+        e.sync().await;
+        assert!(e.lp("f.txt").exists(), "remotely-edited file restored locally");
+        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"remote-edit-wins");
+        assert!(e.r_exists("f.txt").await);
+        e.cleanup().await;
+        println!("live_delete_vs_modify OK");
     }
 
     /// Empty directories propagate in both directions — creation and deletion.
@@ -1366,6 +1443,150 @@ mod tests {
 
         e.cleanup().await;
         println!("live_ignore_patterns OK");
+    }
+
+    /// Pairing a folder that already holds identical content on BOTH sides (a
+    /// first sync with no journal): everything is adopted silently — no
+    /// conflicts, no conflicted copies, no re-transfer, and a clean second run.
+    #[tokio::test]
+    #[ignore]
+    async fn live_first_sync_preexisting_identical() {
+        let e = LiveEnv::new("adoptfolder");
+        // Local tree …
+        std::fs::create_dir_all(e.lp("docs")).unwrap();
+        std::fs::write(e.lp("top.txt"), b"top-content").unwrap();
+        std::fs::write(e.lp("docs/note.txt"), b"note-content").unwrap();
+        // … and the very same tree already on the server, before first sync.
+        // The pairing targets an existing remote folder, so create the root too.
+        e.client.mkcol(&e.remote).await.unwrap();
+        e.client.mkcol(&e.rp("docs")).await.unwrap();
+        e.client.put_bytes(&e.rp("top.txt"), b"top-content".to_vec()).await.unwrap();
+        e.client.put_bytes(&e.rp("docs/note.txt"), b"note-content".to_vec()).await.unwrap();
+
+        let s = e.sync().await;
+        assert_eq!(s.conflicts, 0, "identical pre-existing content is adopted, not a conflict");
+        assert_eq!(s.uploaded + s.downloaded, 0, "nothing re-transferred");
+        let any_copy = std::fs::read_dir(&e.local)
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .any(|x| x.file_name().to_string_lossy().contains("conflicted copy"));
+        assert!(!any_copy, "no conflicted copies created");
+        // Both sides still intact.
+        assert_eq!(e.r_bytes("docs/note.txt").await, b"note-content");
+        assert_eq!(std::fs::read(e.lp("top.txt")).unwrap(), b"top-content");
+        // Second run is a clean no-op — proves the adoption was journaled.
+        let s2 = e.sync().await;
+        assert_eq!(
+            s2.uploaded + s2.downloaded + s2.deleted_local + s2.deleted_remote + s2.conflicts,
+            0,
+            "converged"
+        );
+
+        e.cleanup().await;
+        println!("live_first_sync_preexisting_identical OK");
+    }
+
+    // ---- CalDAV / CardDAV -----------------------------------------------------
+    // Exercise the raw DAV layer (dav.rs) against Nextcloud's PIM endpoints. The
+    // codec (contentline/vcard/ical) is unit-tested separately; the live value
+    // here is the real round-trip and — crucially — the ETag guard that stops a
+    // stale write from clobbering a concurrent change. Needs the default
+    // `contacts` addressbook and `personal` calendar (live-tests.sh ensures them).
+
+    fn live_client() -> WebDavClient {
+        use crate::config::{Account, ServerKind};
+        let account = Account::new(
+            std::env::var("NC_URL").expect("NC_URL"),
+            std::env::var("NC_USER").expect("NC_USER"),
+            ServerKind::Nextcloud,
+        );
+        WebDavClient::new(&account, std::env::var("NC_PASS").expect("NC_PASS")).unwrap()
+    }
+
+    fn uniq_tag() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    }
+
+    /// Re-read the ETag when a PUT response omitted the header.
+    async fn etag_of(c: &WebDavClient, path: &str, from_put: String) -> String {
+        if from_put.is_empty() {
+            c.dav_fetch_etag(path).await.unwrap()
+        } else {
+            from_put
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_carddav_crud() {
+        let c = live_client();
+        let user = c.user().to_string();
+        let uid = format!("cirtest-{}", uniq_tag());
+        let path = format!("addressbooks/users/{user}/contacts/{uid}.vcf");
+        let ct = "text/vcard; charset=utf-8";
+        let card = |email: &str| {
+            format!(
+                "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:{uid}\r\nFN:Test Person\r\n\
+                 N:Person;Test;;;\r\nEMAIL;TYPE=WORK:{email}\r\n\
+                 X-CIRRUST-CUSTOM:preserve-me\r\nEND:VCARD\r\n"
+            )
+        };
+
+        // Create → read back → custom property survives the server round-trip.
+        let e1 = etag_of(&c, &path, c.dav_put_new(&path, ct, card("a@example.org")).await.unwrap()).await;
+        let (_, body) = c.dav_get_item(&path).await.unwrap();
+        assert!(body.contains("FN:Test Person"), "vCard stored");
+        assert!(body.contains("X-CIRRUST-CUSTOM:preserve-me"), "custom property preserved");
+
+        // Update guarded by the current ETag → succeeds and bumps the ETag.
+        let e2 = etag_of(&c, &path, c.dav_put_update(&path, ct, card("b@example.org"), &e1).await.unwrap()).await;
+        assert_ne!(e1, e2, "ETag changed after update");
+
+        // The anti-clobber guard: an update with the STALE ETag is rejected.
+        match c.dav_put_update(&path, ct, card("c@example.org"), &e1).await {
+            Err(AppError::Server { status: 412, .. }) => {}
+            other => panic!("stale If-Match must be a 412, got {other:?}"),
+        }
+
+        c.dav_delete_item(&path, &e2).await.unwrap();
+        assert!(c.dav_get_item(&path).await.is_err(), "contact deleted");
+        println!("live_carddav_crud OK");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_caldav_crud() {
+        let c = live_client();
+        let user = c.user().to_string();
+        let uid = format!("cirtest-{}", uniq_tag());
+        let path = format!("calendars/{user}/personal/{uid}.ics");
+        let ct = "text/calendar; charset=utf-8";
+        let ev = |summary: &str| {
+            format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Cirrust//live test//EN\r\n\
+                 BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20260101T000000Z\r\n\
+                 DTSTART:20260201T100000Z\r\nDTEND:20260201T110000Z\r\n\
+                 SUMMARY:{summary}\r\nX-CIRRUST-CUSTOM:keep-this\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+        };
+
+        let e1 = etag_of(&c, &path, c.dav_put_new(&path, ct, ev("Live test event")).await.unwrap()).await;
+        let (_, body) = c.dav_get_item(&path).await.unwrap();
+        assert!(body.contains("SUMMARY:Live test event"), "event stored");
+        assert!(body.contains("X-CIRRUST-CUSTOM:keep-this"), "custom property preserved");
+
+        let e2 = etag_of(&c, &path, c.dav_put_update(&path, ct, ev("Edited event"), &e1).await.unwrap()).await;
+        assert_ne!(e1, e2, "ETag changed after update");
+
+        match c.dav_put_update(&path, ct, ev("Clobber"), &e1).await {
+            Err(AppError::Server { status: 412, .. }) => {}
+            other => panic!("stale If-Match must be a 412, got {other:?}"),
+        }
+
+        c.dav_delete_item(&path, &e2).await.unwrap();
+        assert!(c.dav_get_item(&path).await.is_err(), "event deleted");
+        println!("live_caldav_crud OK");
     }
 
     #[test]

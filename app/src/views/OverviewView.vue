@@ -263,15 +263,38 @@ function rowName(row: FolderRow): string {
   return row.entry ? row.entry.name : row.folder!.remotePath;
 }
 
-/** Sync an existing server folder down into ~/Nextcloud/<name> (two-way). */
-async function syncRemoteDir(path: string) {
-  const p = cleanRemote(path);
-  addingRemote.value = p;
+// Clicking "Sync" opens an inline destination chooser instead of downloading
+// immediately: if the user already has a copy of the folder on disk, pointing
+// the pair at it lets verification adopt the files in place — a silent
+// default of a fresh empty folder meant re-downloading gigabytes that were
+// already on the machine.
+const syncTarget = ref<{ path: string; local: string } | null>(null);
+const syncError = ref<string | null>(null);
+
+async function openSyncTarget(entry: FileEntry) {
+  const p = cleanRemote(entry.path);
+  const name = p.split("/").filter(Boolean).pop() ?? "Nextcloud";
+  const home = (await homeDir()).replace(/\/+$/, "");
+  syncError.value = null;
+  syncTarget.value = { path: p, local: `${home}/Nextcloud/${name}` };
+}
+
+async function pickSyncTargetLocal() {
+  const dir = await open({ directory: true, multiple: false });
+  if (typeof dir === "string" && syncTarget.value) syncTarget.value.local = dir;
+}
+
+async function startRemoteSync() {
+  if (!syncTarget.value) return;
+  const { path, local } = syncTarget.value;
+  addingRemote.value = path;
+  syncError.value = null;
   try {
-    const name = p.split("/").filter(Boolean).pop() ?? "Nextcloud";
-    const home = (await homeDir()).replace(/\/+$/, "");
     const acc = newFolderAccount.value ?? activeAccount.value?.id ?? null;
-    await syncStore.addFolder(`${home}/Nextcloud/${name}`, p, acc, true);
+    await syncStore.addFolder(local, path, acc, true);
+    syncTarget.value = null;
+  } catch (e) {
+    syncError.value = (e as { message?: string })?.message ?? String(e);
   } finally {
     addingRemote.value = null;
   }
@@ -294,6 +317,10 @@ async function addFolder() {
     }
     localPath.value = "";
     remotePath.value = "";
+  } catch (e) {
+    // e.g. the overlap guard: this remote/local folder is already paired.
+    addNotice.value = (e as { message?: string })?.message ?? String(e);
+    setTimeout(() => (addNotice.value = null), 8000);
   } finally {
     busy.value = false;
   }
@@ -684,7 +711,7 @@ onMounted(async () => {
             <li
               v-for="row in folderRows"
               :key="row.folder?.id ?? row.entry!.path"
-              class="flex items-center gap-3 py-2.5"
+              class="flex flex-wrap items-center gap-3 py-2.5"
             >
               <Folder
                 class="h-5 w-5 shrink-0"
@@ -757,10 +784,51 @@ onMounted(async () => {
                 v-else-if="!coveredBy(row.entry!.path)"
                 class="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs text-ink hover:bg-surface-alt disabled:opacity-50"
                 :disabled="addingRemote !== null"
-                @click="syncRemoteDir(row.entry!.path)"
+                @click="openSyncTarget(row.entry!)"
               >
-                {{ addingRemote === cleanRemote(row.entry!.path) ? "Adding…" : "Sync" }}
+                Sync
               </button>
+
+              <!-- Destination chooser for the clicked folder. -->
+              <div
+                v-if="row.entry && syncTarget && syncTarget.path === cleanRemote(row.entry.path)"
+                class="w-full rounded-lg border border-line bg-surface-alt p-3"
+              >
+                <p class="mb-2 text-xs text-ink-soft">
+                  Where should <span class="text-ink">{{ syncTarget.path }}</span> live on this
+                  computer? If you already have a copy of it, choose that folder — matching
+                  files are detected and <em>not</em> downloaded again.
+                </p>
+                <div class="flex items-center gap-2">
+                  <input
+                    v-model="syncTarget.local"
+                    class="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-ink outline-none focus:border-accent"
+                  />
+                  <button
+                    class="shrink-0 rounded-lg border border-line p-2 text-ink-soft hover:bg-surface hover:text-ink"
+                    title="Choose an existing folder"
+                    @click="pickSyncTargetLocal"
+                  >
+                    <FolderSearch class="h-4 w-4" />
+                  </button>
+                  <button
+                    class="shrink-0 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-50"
+                    :disabled="!syncTarget.local || addingRemote !== null"
+                    @click="startRemoteSync"
+                  >
+                    {{ addingRemote ? "Adding…" : "Start sync" }}
+                  </button>
+                  <button
+                    class="shrink-0 rounded-lg border border-line px-3 py-1.5 text-sm text-ink hover:bg-surface"
+                    @click="syncTarget = null"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <p v-if="syncError" class="mt-2 rounded-lg bg-negative/10 px-3 py-1.5 text-xs text-negative">
+                  {{ syncError }}
+                </p>
+              </div>
             </li>
           </ul>
         </section>

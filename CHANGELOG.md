@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Overlapping folder pairs are refused.** Adding a pair whose remote folder
+  (same account) or local folder is already covered by an existing pair —
+  identical or nested either way — now fails with a clear error instead of
+  silently creating a second pair that downloads everything again and then
+  fights the first one over deletions. The invariant lives in the backend, so
+  no UI change can lose it.
+- **One-click Sync asks where the folder should live.** Clicking Sync on a
+  server folder now opens an inline destination chooser (default
+  `~/Nextcloud/<name>`) instead of downloading immediately — point it at an
+  existing copy of the folder and matching files are adopted in place rather
+  than downloaded again.
 - **First syncs no longer look like a full re-download.** Files that already
   exist on both sides with the same size are *compared* against the server
   (and adopted in place when identical), but the progress view planned them as

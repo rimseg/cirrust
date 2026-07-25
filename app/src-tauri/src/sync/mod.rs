@@ -581,6 +581,19 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Do two folder paths overlap — equal, or one nested inside the other —
+/// compared by whole path segments (`/a/bc` does not overlap `/a/b`)?
+///
+/// Overlapping pairs are refused at add time: two pairs over the same remote
+/// tree download everything twice and then fight each other's deletions, and
+/// two pairs over the same local tree race the filesystem watcher. This
+/// invariant lives in the backend so no UI rework can lose it.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let norm = |p: &str| format!("{}/", p.trim_end_matches('/'));
+    let (a, b) = (norm(a), norm(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
 fn new_id() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("f{nanos:x}")
@@ -654,6 +667,24 @@ pub async fn sync_add_folder(
         let client = state.client_for(&account_id).await?;
         engine::unique_remote_path(&client, &requested).await?
     };
+    // Refuse overlapping pairs (see `paths_overlap`): the same remote tree
+    // twice means duplicate full downloads + fighting deletions; the same
+    // local tree twice means two engines writing into each other.
+    for f in &cfg.sync_folders {
+        if f.account_id == account_id && paths_overlap(&f.remote_path, &remote_path) {
+            return Err(AppError::msg(format!(
+                "{remote_path} is already being synced to {} — remove that folder pair first, \
+                 or choose a different server folder",
+                f.local_path
+            )));
+        }
+        if paths_overlap(&f.local_path, &local_path) {
+            return Err(AppError::msg(format!(
+                "{local_path} overlaps the synced folder {} — choose a different local folder",
+                f.local_path
+            )));
+        }
+    }
     let folder = SyncFolder {
         id: new_id(),
         account_id,
@@ -873,4 +904,21 @@ pub async fn sync_resolve_conflict(
 pub fn sync_now(manager: State<'_, SyncManager>) -> AppResult<()> {
     manager.kick();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paths_overlap;
+
+    #[test]
+    fn overlap_is_segment_wise() {
+        assert!(paths_overlap("/Music", "/Music"), "equal paths overlap");
+        assert!(paths_overlap("/Music", "/Music/sub"), "parent covers child");
+        assert!(paths_overlap("/Music/sub", "/Music"), "child is covered by parent");
+        assert!(paths_overlap("/", "/anything"), "root covers everything");
+        assert!(!paths_overlap("/Music", "/Music 2"), "sibling with a name prefix is distinct");
+        assert!(!paths_overlap("/Music", "/Musical"), "string prefix is not a path prefix");
+        assert!(!paths_overlap("/a/b", "/a/c"), "siblings are distinct");
+        assert!(paths_overlap("/home/x/Cloud", "/home/x/Cloud/music"), "local nesting too");
+    }
 }

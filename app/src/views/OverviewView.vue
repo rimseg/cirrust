@@ -3,13 +3,22 @@ import { computed, onMounted, ref } from "vue";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
 import { storeToRefs } from "pinia";
-import { account, sync } from "../api";
-import type { Account, AccountInfo, ActivityItem, SyncState } from "../api/types";
+import { homeDir } from "@tauri-apps/api/path";
+import { account, files, sync } from "../api";
+import type {
+  Account,
+  AccountInfo,
+  ActivityItem,
+  FileEntry,
+  SyncFolder,
+  SyncState,
+} from "../api/types";
 import { useSyncStore } from "../stores/sync";
 import { useAuthStore } from "../stores/auth";
 import { basename, formatSize, formatSpeed, relativeTime } from "../utils/format";
 import {
   RefreshCw,
+  Folder,
   FolderSearch,
   Check,
   Clock,
@@ -185,12 +194,104 @@ async function pickLocal() {
   }
 }
 
+// ---- Folders on the server --------------------------------------------------
+// The other half of "add a folder": a fresh client pulling its existing cloud
+// folders down. Shown as its own section above "Synced folders".
+const browsePath = ref("/");
+const browseDirs = ref<FileEntry[]>([]);
+const browseLoading = ref(false);
+const addingRemote = ref<string | null>(null);
+
+function cleanRemote(path: string): string {
+  return "/" + path.replace(/^\/+|\/+$/g, "");
+}
+
+async function loadBrowse(path: string) {
+  browseLoading.value = true;
+  try {
+    browsePath.value = cleanRemote(path);
+    browseDirs.value = (await files.list(path)).filter((e) => e.isDir);
+  } finally {
+    browseLoading.value = false;
+  }
+}
+
+function browseUp() {
+  const p = browsePath.value.replace(/\/+$/, "");
+  loadBrowse(p.slice(0, p.lastIndexOf("/")) || "/");
+}
+
+/** The sync pair mapped exactly to this server path, if any. */
+function pairFor(path: string) {
+  const p = cleanRemote(path);
+  return folders.value.find((f) => f.remotePath === p);
+}
+
+/** The pair that already syncs this path as part of a parent folder, if any. */
+function coveredBy(path: string) {
+  const p = cleanRemote(path);
+  return folders.value.find(
+    (f) => f.remotePath !== p && (p + "/").startsWith(f.remotePath.replace(/\/$/, "") + "/"),
+  );
+}
+
+/** Does a synced pair live somewhere underneath this server folder? */
+function containsSynced(path: string): boolean {
+  const p = cleanRemote(path);
+  return folders.value.some(
+    (f) => f.remotePath !== p && (f.remotePath + "/").startsWith(p.replace(/\/$/, "") + "/"),
+  );
+}
+
+/** One row per server folder at the current browse level, with its sync state
+ * attached — plus any synced pairs not visible at this level, so the single
+ * list is always the complete picture. */
+interface FolderRow {
+  entry?: FileEntry;
+  folder?: SyncFolder;
+}
+const folderRows = computed<FolderRow[]>(() => {
+  const rows: FolderRow[] = browseDirs.value.map((e) => ({ entry: e, folder: pairFor(e.path) }));
+  const visible = new Set(rows.filter((r) => r.folder).map((r) => r.folder!.id));
+  for (const f of folders.value) {
+    if (!visible.has(f.id)) rows.push({ folder: f });
+  }
+  return rows;
+});
+
+function rowName(row: FolderRow): string {
+  return row.entry ? row.entry.name : row.folder!.remotePath;
+}
+
+/** Sync an existing server folder down into ~/Nextcloud/<name> (two-way). */
+async function syncRemoteDir(path: string) {
+  const p = cleanRemote(path);
+  addingRemote.value = p;
+  try {
+    const name = p.split("/").filter(Boolean).pop() ?? "Nextcloud";
+    const home = (await homeDir()).replace(/\/+$/, "");
+    const acc = newFolderAccount.value ?? activeAccount.value?.id ?? null;
+    await syncStore.addFolder(`${home}/Nextcloud/${name}`, p, acc, true);
+  } finally {
+    addingRemote.value = null;
+  }
+}
+
+const addNotice = ref<string | null>(null);
+
 async function addFolder() {
   if (!localPath.value || !remotePath.value) return;
   busy.value = true;
   try {
+    const requested = cleanRemote(remotePath.value);
     const acc = newFolderAccount.value ?? activeAccount.value?.id ?? null;
-    await syncStore.addFolder(localPath.value, remotePath.value, acc);
+    const folder = await syncStore.addFolder(localPath.value, remotePath.value, acc);
+    // The backend refuses to sync a fresh pair into a server folder that
+    // already has files — tell the user where their folder actually went.
+    if (folder.remotePath !== requested) {
+      addNotice.value = `${requested} already has files on the server — syncing to ${folder.remotePath} instead.`;
+      setTimeout(() => (addNotice.value = null), 8000);
+    }
     localPath.value = "";
     remotePath.value = "";
   } finally {
@@ -246,6 +347,7 @@ onMounted(async () => {
   syncStore.refreshStatus();
   syncStore.refreshActivity();
   syncStore.loadConflicts();
+  loadBrowse("/").catch(() => {});
   await syncStore.loadSettings();
   ignoreText.value = syncStore.ignorePatterns.join("\n");
   try {
@@ -474,20 +576,34 @@ onMounted(async () => {
 
         <!-- Sync a new folder -->
         <section class="rounded-xl border border-line bg-surface p-4">
-          <h2 class="mb-3 text-sm font-medium text-ink">Sync a new folder</h2>
+          <h2 class="mb-1 text-sm font-medium text-ink">Sync a new folder</h2>
+          <p class="mb-3 text-xs text-ink-soft">
+            Upload a folder from this computer and keep it in sync. If the server
+            name is already taken by other files, a "<code>name 2</code>" folder
+            is created instead — existing server data is never absorbed. To sync
+            a folder that already exists in your cloud, use the Folders list
+            below.
+          </p>
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <button
-              class="flex-1 truncate rounded-lg border border-line bg-surface-alt px-3 py-2 text-left text-sm"
-              :class="localPath ? 'text-ink' : 'text-ink-soft'"
-              @click="pickLocal"
-            >
-              {{ localPath || "Choose local folder…" }}
-            </button>
-            <span class="text-ink-soft">→</span>
+            <div class="flex min-w-0 flex-1 items-center gap-1">
+              <input
+                v-model="localPath"
+                placeholder="Local folder (created if missing)"
+                class="min-w-0 flex-1 rounded-lg border border-line bg-surface-alt px-3 py-2 text-sm text-ink outline-none focus:border-accent"
+              />
+              <button
+                class="shrink-0 rounded-lg border border-line p-2 text-ink-soft hover:bg-surface-alt hover:text-ink"
+                title="Choose an existing local folder"
+                @click="pickLocal"
+              >
+                <FolderSearch class="h-4 w-4" />
+              </button>
+            </div>
+            <span class="text-ink-soft" title="Changes sync in both directions">↔</span>
             <input
               v-model="remotePath"
               placeholder="/RemoteFolder"
-              class="flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent"
+              class="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent"
             />
             <button
               class="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-50"
@@ -497,6 +613,9 @@ onMounted(async () => {
               Add
             </button>
           </div>
+          <p v-if="addNotice" class="mt-2 rounded-lg bg-warning/10 px-3 py-1.5 text-xs text-warning">
+            {{ addNotice }}
+          </p>
           <div v-if="accounts.length > 1" class="mt-2 flex items-center gap-2 text-xs">
             <span class="text-ink-soft">Sync to account</span>
             <select
@@ -510,57 +629,121 @@ onMounted(async () => {
           </div>
         </section>
 
-        <!-- Existing folders -->
-        <section>
-          <h2 class="mb-2 text-sm font-medium text-ink">Synced folders</h2>
-          <p v-if="folders.length === 0" class="rounded-xl border border-dashed border-line py-3 text-center text-xs text-ink-soft">
-            No folders are being synced yet — add one above.
+        <!-- Folders: the server's folder tree with sync state overlaid — one
+             list answers both "what's in my cloud" and "what's on this PC". -->
+        <section class="rounded-xl border border-line bg-surface p-4">
+          <h2 class="mb-1 text-sm font-medium text-ink">Folders</h2>
+          <p class="mb-2 text-xs text-ink-soft">
+            Your cloud folders and whether they sync to this computer. Syncing a
+            folder downloads it into <code>~/Nextcloud/&lt;name&gt;</code> and
+            keeps both sides in sync.
           </p>
-          <ul v-else class="space-y-2">
-            <li
-              v-for="folder in folders"
-              :key="folder.id"
-              class="flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3"
+          <div class="flex items-center gap-2 border-b border-line pb-2">
+            <button
+              class="rounded p-1 text-ink-soft hover:bg-surface-alt hover:text-ink disabled:opacity-40"
+              :disabled="browsePath === '/'"
+              title="Up one level"
+              @click="browseUp"
             >
+              <ArrowUp class="h-4 w-4" />
+            </button>
+            <span class="min-w-0 flex-1 truncate text-xs text-ink">
+              {{ browsePath === "/" ? "All files" : browsePath }}
+            </span>
+            <button
+              class="rounded p-1 text-ink-soft hover:bg-surface-alt hover:text-ink"
+              title="Reload"
+              @click="loadBrowse(browsePath)"
+            >
+              <RefreshCw class="h-4 w-4" />
+            </button>
+          </div>
+          <p v-if="browseLoading && folderRows.length === 0" class="py-2 text-xs text-ink-soft">
+            Loading…
+          </p>
+          <p v-else-if="folderRows.length === 0" class="py-2 text-xs text-ink-soft">
+            No folders yet — add one above, or create folders in your cloud.
+          </p>
+          <ul v-else class="divide-y divide-line">
+            <li
+              v-for="row in folderRows"
+              :key="row.folder?.id ?? row.entry!.path"
+              class="flex items-center gap-3 py-2.5"
+            >
+              <Folder
+                class="h-5 w-5 shrink-0"
+                :class="row.folder || (row.entry && coveredBy(row.entry.path)) ? 'text-accent' : 'text-ink-soft'"
+              />
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  <div class="truncate text-sm text-ink">{{ folder.localPath }}</div>
-                  <span
-                    v-if="accounts.length > 1"
-                    class="shrink-0 rounded-full bg-surface-alt px-2 py-0.5 text-[11px] text-ink-soft"
-                    :title="accountKindOf(folder.accountId) ?? ''"
+                  <button
+                    v-if="row.entry"
+                    class="truncate text-sm text-ink hover:underline"
+                    title="Open folder"
+                    @click="loadBrowse(row.entry.path)"
                   >
-                    {{ accountLabel(folder.accountId) }}
+                    {{ rowName(row) }}
+                  </button>
+                  <span v-else class="truncate text-sm text-ink">{{ rowName(row) }}</span>
+                  <span
+                    v-if="row.folder && accounts.length > 1"
+                    class="shrink-0 rounded-full bg-surface-alt px-2 py-0.5 text-[11px] text-ink-soft"
+                    :title="accountKindOf(row.folder.accountId) ?? ''"
+                  >
+                    {{ accountLabel(row.folder.accountId) }}
                   </span>
                 </div>
-                <div class="truncate text-xs text-ink-soft">↔ {{ folder.remotePath }}</div>
-                <div class="mt-1 flex items-center gap-1.5 text-xs">
-                  <component
-                    :is="folderState(folder).icon"
-                    class="h-3.5 w-3.5 shrink-0"
-                    :class="[folderState(folder).cls, folderState(folder).spin ? 'animate-spin' : '']"
-                  />
-                  <span :class="folderState(folder).cls">{{ folderState(folder).label }}</span>
-                  <span v-if="folderMeta(folder)" class="text-ink-soft">· {{ folderMeta(folder) }}</span>
+
+                <!-- Synced pair: destination + live status. -->
+                <template v-if="row.folder">
+                  <div class="truncate text-xs text-ink-soft">↔ {{ row.folder.localPath }}</div>
+                  <div class="mt-0.5 flex items-center gap-1.5 text-xs">
+                    <component
+                      :is="folderState(row.folder).icon"
+                      class="h-3.5 w-3.5 shrink-0"
+                      :class="[folderState(row.folder).cls, folderState(row.folder).spin ? 'animate-spin' : '']"
+                    />
+                    <span :class="folderState(row.folder).cls">{{ folderState(row.folder).label }}</span>
+                    <span v-if="folderMeta(row.folder)" class="text-ink-soft">· {{ folderMeta(row.folder) }}</span>
+                  </div>
+                </template>
+                <!-- Not paired itself, but inside an already-synced folder. -->
+                <div v-else-if="coveredBy(row.entry!.path)" class="truncate text-xs text-positive">
+                  Synced as part of {{ coveredBy(row.entry!.path)!.remotePath }}
+                </div>
+                <div v-else class="truncate text-xs text-ink-soft">
+                  Not synced on this computer<template v-if="containsSynced(row.entry!.path)"> · contains a synced folder</template>
                 </div>
               </div>
+
+              <!-- Controls: pause/remove for pairs, Sync for the rest. -->
+              <template v-if="row.folder">
+                <button
+                  class="relative h-5 w-9 shrink-0 rounded-full transition"
+                  :class="row.folder.enabled ? 'bg-accent' : 'bg-line'"
+                  :title="row.folder.enabled ? 'Pause this folder' : 'Resume this folder'"
+                  @click="syncStore.setFolderEnabled(row.folder.id, !row.folder.enabled)"
+                >
+                  <span
+                    class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-[left]"
+                    :class="row.folder.enabled ? 'left-[18px]' : 'left-0.5'"
+                  />
+                </button>
+                <button
+                  class="rounded p-1.5 text-ink-soft transition hover:text-negative"
+                  title="Stop syncing (files are kept)"
+                  @click="syncStore.removeFolder(row.folder.id)"
+                >
+                  <Trash2 class="h-4 w-4" />
+                </button>
+              </template>
               <button
-                class="relative h-5 w-9 shrink-0 rounded-full transition"
-                :class="folder.enabled ? 'bg-accent' : 'bg-line'"
-                :title="folder.enabled ? 'Pause this folder' : 'Resume this folder'"
-                @click="syncStore.setFolderEnabled(folder.id, !folder.enabled)"
+                v-else-if="!coveredBy(row.entry!.path)"
+                class="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs text-ink hover:bg-surface-alt disabled:opacity-50"
+                :disabled="addingRemote !== null"
+                @click="syncRemoteDir(row.entry!.path)"
               >
-                <span
-                  class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-[left]"
-                  :class="folder.enabled ? 'left-[18px]' : 'left-0.5'"
-                />
-              </button>
-              <button
-                class="rounded p-1.5 text-ink-soft transition hover:text-negative"
-                title="Stop syncing"
-                @click="syncStore.removeFolder(folder.id)"
-              >
-                <Trash2 class="h-4 w-4" />
+                {{ addingRemote === cleanRemote(row.entry!.path) ? "Adding…" : "Sync" }}
               </button>
             </li>
           </ul>

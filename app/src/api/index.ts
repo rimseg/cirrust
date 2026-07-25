@@ -143,8 +143,15 @@ export const carddav = {
 export const sync = {
   listFolders: () => invoke<SyncFolder[]>("sync_list_folders"),
   folderStats: () => invoke<FolderStat[]>("sync_folder_stats"),
-  addFolder: (localPath: string, remotePath: string, accountId: string | null) =>
-    invoke<SyncFolder>("sync_add_folder", { localPath, remotePath, accountId }),
+  /** `mergeExisting: false` renames an occupied remote path to "<name> 2"
+   * instead of syncing into pre-existing server data. */
+  addFolder: (
+    localPath: string,
+    remotePath: string,
+    accountId: string | null,
+    mergeExisting = false,
+  ) =>
+    invoke<SyncFolder>("sync_add_folder", { localPath, remotePath, accountId, mergeExisting }),
   removeFolder: (id: string) => invoke<void>("sync_remove_folder", { id }),
   status: () => invoke<SyncStatus>("sync_status"),
   progress: () => invoke<SyncProgress>("sync_progress"),

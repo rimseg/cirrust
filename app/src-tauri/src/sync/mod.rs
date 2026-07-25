@@ -9,15 +9,16 @@ mod progress;
 use crate::config::{AppConfig, SyncFolder};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use engine::Cancel;
 use journal::Journal;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use walkdir::WalkDir;
 use progress::{Activity, ActivityLog, Progress, Reporter};
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch};
@@ -28,7 +29,6 @@ use tokio::sync::{mpsc, watch};
 pub enum SyncState {
     Idle,
     Syncing,
-    #[allow(dead_code)] // reserved: emitted when a folder is disabled
     Paused,
     Error,
     Offline,
@@ -58,13 +58,20 @@ impl SyncStatus {
     }
 }
 
+/// Ids of folders currently disabled ("paused") — shared live with the run
+/// loop so disabling a folder cancels its in-flight sync, not just future ones.
+type DisabledFolders = Arc<RwLock<HashSet<String>>>;
+
 /// Owns the background sync task's control channels + live surfaces.
 pub struct SyncManager {
+    app: AppHandle,
     status_rx: watch::Receiver<SyncStatus>,
+    status_tx: watch::Sender<SyncStatus>,
     progress_rx: watch::Receiver<Progress>,
     activity: ActivityLog,
     trigger: mpsc::UnboundedSender<()>,
     paused: Arc<AtomicBool>,
+    disabled: DisabledFolders,
 }
 
 impl SyncManager {
@@ -73,6 +80,9 @@ impl SyncManager {
         let cfg0 = AppConfig::load(&app).unwrap_or_default();
         let count = cfg0.sync_folders.len();
         let paused = Arc::new(AtomicBool::new(cfg0.paused));
+        let disabled: DisabledFolders = Arc::new(RwLock::new(
+            cfg0.sync_folders.iter().filter(|f| !f.enabled).map(|f| f.id.clone()).collect(),
+        ));
         let mut initial = SyncStatus::new(count);
         initial.paused = cfg0.paused;
         // Nothing is known about the server yet — no account has even been
@@ -123,15 +133,16 @@ impl SyncManager {
         ));
 
         tauri::async_runtime::spawn(run_loop(
-            app,
+            app.clone(),
             trigger_rx,
-            status_tx,
+            status_tx.clone(),
             reporter,
             paused.clone(),
+            disabled.clone(),
             online,
         ));
 
-        SyncManager { status_rx, progress_rx, activity, trigger, paused }
+        SyncManager { app, status_rx, status_tx, progress_rx, activity, trigger, paused, disabled }
     }
 
     pub fn status(&self) -> SyncStatus {
@@ -155,7 +166,32 @@ impl SyncManager {
 
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
-        self.kick(); // refresh status (and resume immediately if unpaused)
+        // Publish the new state synchronously. A running sync only *notices*
+        // the flag at its next cancellation point, and the old behaviour —
+        // waiting for the run loop to report — meant the UI toggle visibly
+        // snapped back to "Pause" while a run was in flight.
+        let mut status = self.status_rx.borrow().clone();
+        status.paused = paused;
+        status.state = if paused { SyncState::Paused } else { SyncState::Idle };
+        if !paused {
+            status.message = None;
+        }
+        let _ = self.status_tx.send(status.clone());
+        let _ = self.app.emit("sync://status", &status);
+        self.kick(); // resume immediately if unpaused; refresh otherwise
+    }
+
+    /// Flip a folder's enabled flag for the *running* engine: an in-flight sync
+    /// of that folder is cancelled, not just future rounds.
+    pub fn set_folder_enabled(&self, id: &str, enabled: bool) {
+        if let Ok(mut d) = self.disabled.write() {
+            if enabled {
+                d.remove(id);
+            } else {
+                d.insert(id.to_string());
+            }
+        }
+        self.kick();
     }
 }
 
@@ -167,6 +203,7 @@ async fn run_loop(
     status_tx: watch::Sender<SyncStatus>,
     reporter: Reporter,
     paused: Arc<AtomicBool>,
+    disabled: DisabledFolders,
     online: Arc<AtomicBool>,
 ) {
     let (fs_tx, mut fs_rx) = mpsc::unbounded_channel();
@@ -189,7 +226,7 @@ async fn run_loop(
             }
         }
 
-        run_all(&app, &status_tx, &reporter, &paused, &online).await;
+        run_all(&app, &status_tx, &reporter, &paused, &disabled, &online).await;
         // Folders may have been added/removed while we ran.
         _watcher = rewatch(&app, &fs_tx);
         // Re-arm the periodic poll to a full period *after* the run finishes, so
@@ -292,7 +329,8 @@ async fn run_all(
     app: &AppHandle,
     status_tx: &watch::Sender<SyncStatus>,
     reporter: &Reporter,
-    paused: &AtomicBool,
+    paused: &Arc<AtomicBool>,
+    disabled: &DisabledFolders,
     online: &AtomicBool,
 ) {
     let cfg = match AppConfig::load(app) {
@@ -302,12 +340,25 @@ async fn run_all(
     let ignore = cfg.ignore_patterns.clone();
     let folders: Vec<SyncFolder> = cfg.sync_folders.into_iter().filter(|f| f.enabled).collect();
     let count = folders.len();
-    let is_paused = paused.load(Ordering::Relaxed);
 
-    if is_paused {
+    if paused.load(Ordering::Relaxed) {
         publish(app, status_tx, SyncState::Paused, None, None, count, true);
         return;
     }
+
+    // Cancellation for one folder: the global pause OR that folder being
+    // disabled mid-run. Checked live inside the engine at every safe point.
+    let folder_cancel = |id: &str| {
+        let paused = paused.clone();
+        let disabled = disabled.clone();
+        let id = id.to_string();
+        Cancel::new(move || {
+            paused.load(Ordering::Relaxed)
+                || disabled.read().map(|d| d.contains(&id)).unwrap_or(false)
+        })
+    };
+    let folder_disabled =
+        |id: &str| disabled.read().map(|d| d.contains(id)).unwrap_or(false);
 
     // Reachability gate. A signed-in account whose server doesn't answer used to
     // fall straight through into the walk, where the run sat inside a request
@@ -352,6 +403,13 @@ async fn run_all(
         Vec::new();
     let (mut files_total, mut bytes_total) = (0u64, 0u64);
     for folder in &folders {
+        if paused.load(Ordering::Relaxed) {
+            publish(app, status_tx, SyncState::Paused, None, None, count, true);
+            return;
+        }
+        if folder_disabled(&folder.id) {
+            continue;
+        }
         let client = match state.client_for(&folder.account_id).await {
             Ok(c) => c,
             Err(_) => {
@@ -360,15 +418,19 @@ async fn run_all(
                 continue;
             }
         };
+        let cancel = folder_cancel(&folder.id);
         // NB: no `Syncing` status here. The scan is silent so an idle poll that
         // finds nothing to do never flips the tray green→blue→green. We only go
         // `Syncing` in phase 2, and only for folders that actually transfer.
-        match engine::prepare(&jdir, &client, folder, &ignore, reporter).await {
+        match engine::prepare(&jdir, &client, folder, &ignore, reporter, &cancel).await {
             Ok(p) => {
                 files_total += p.files_total;
                 bytes_total += p.bytes_total;
                 prepared.push((folder, client, p));
             }
+            // A cancelled scan is not a sync error — the pause/disable check
+            // at the top of the next iteration (or round) reports the state.
+            Err(_) if cancel.is_cancelled() => {}
             Err(e) => {
                 log::warn!("sync scan failed for {}: {e}", folder.remote_path);
                 last_error = Some(e.to_string());
@@ -386,14 +448,30 @@ async fn run_all(
     // Phase 2 — execute the transfers. Only surface `Syncing` for folders that
     // actually have work, so a fully-synced run stays visually idle (no flash).
     for (folder, client, plan) in prepared {
+        if paused.load(Ordering::Relaxed) {
+            break;
+        }
+        if folder_disabled(&folder.id) {
+            continue;
+        }
         if plan.files_total > 0 {
             publish(app, status_tx, SyncState::Syncing, Some(folder.remote_path.clone()), None, count, false);
         }
-        match engine::sync_prepared(&jdir, &client, folder, plan, reporter, &ignore).await {
+        let cancel = folder_cancel(&folder.id);
+        match engine::sync_prepared(&jdir, &client, folder, plan, reporter, &ignore, &cancel).await
+        {
             Ok(stats) => {
                 new_conflicts += stats.conflicts;
+                if stats.blocked_deletions > 0 {
+                    last_error = Some(format!(
+                        "{}: refused to delete {} files — one side looked missing or emptied; \
+                         the files were kept and will be restored by the next sync",
+                        folder.remote_path, stats.blocked_deletions
+                    ));
+                }
                 log::info!("synced {}: {:?}", folder.remote_path, stats);
             }
+            Err(_) if cancel.is_cancelled() => {}
             Err(e) => {
                 log::warn!("sync failed for {}: {e}", folder.remote_path);
                 last_error = Some(e.to_string());
@@ -401,6 +479,13 @@ async fn run_all(
         }
     }
     reporter.session_end();
+
+    // Paused mid-run: report it now (partial work was journaled safely) and
+    // keep the previous last-sync timestamp — this round did not complete.
+    if paused.load(Ordering::Relaxed) {
+        publish(app, status_tx, SyncState::Paused, None, None, count, true);
+        return;
+    }
 
     // Desktop notifications: only on state transitions / fresh conflicts so a
     // persistent error doesn't re-notify every scheduled run.
@@ -433,13 +518,6 @@ async fn run_all(
     let _ = app.emit("sync://status", &status);
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
-    use tauri_plugin_notification::NotificationExt;
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        log::debug!("notification failed: {e}");
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn publish(
     app: &AppHandle,
@@ -455,8 +533,18 @@ fn publish(
     status.active_folder = active;
     status.message = message;
     status.paused = paused;
+    // Interim states (paused/offline/syncing) don't erase when the folders
+    // last finished a full round — only a completed round updates it.
+    status.last_sync = status_tx.borrow().last_sync.clone();
     let _ = status_tx.send(status.clone());
     let _ = app.emit("sync://status", &status);
+}
+
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        log::debug!("notification failed: {e}");
+    }
 }
 
 /// Build a fresh watcher over all enabled folders. Returns `None` if it can't be
@@ -540,9 +628,11 @@ pub fn sync_folder_stats(app: AppHandle) -> AppResult<Vec<FolderStat>> {
 pub async fn sync_add_folder(
     app: AppHandle,
     manager: State<'_, SyncManager>,
+    state: State<'_, AppState>,
     account_id: Option<String>,
     local_path: String,
     remote_path: String,
+    merge_existing: Option<bool>,
 ) -> AppResult<SyncFolder> {
     let mut cfg = AppConfig::load(&app)?;
     // Default to the active account when the caller doesn't specify one.
@@ -550,11 +640,22 @@ pub async fn sync_add_folder(
         .or_else(|| cfg.active_account.clone())
         .or_else(|| cfg.accounts.first().map(|a| a.id.clone()))
         .ok_or_else(|| AppError::msg("no account to sync against"))?;
+    // A local-first add must never absorb pre-existing server data: unless the
+    // caller explicitly picked an existing server folder (`merge_existing`),
+    // an occupied remote name becomes a second version — "<name> 2" — so the
+    // sync cannot merge with (or ever delete) files it didn't create.
+    let requested = format!("/{}", remote_path.trim_matches('/'));
+    let remote_path = if merge_existing.unwrap_or(false) {
+        requested
+    } else {
+        let client = state.client_for(&account_id).await?;
+        engine::unique_remote_path(&client, &requested).await?
+    };
     let folder = SyncFolder {
         id: new_id(),
         account_id,
         local_path,
-        remote_path: format!("/{}", remote_path.trim_matches('/')),
+        remote_path,
         enabled: true,
     };
     cfg.sync_folders.push(folder.clone());
@@ -572,6 +673,9 @@ pub async fn sync_remove_folder(
     let mut cfg = AppConfig::load(&app)?;
     cfg.sync_folders.retain(|f| f.id != id);
     cfg.save(&app)?;
+    // Cancel any in-flight sync of the folder (ids are never reused, so the
+    // entry staying in the disabled set is harmless), then drop its journal.
+    manager.set_folder_enabled(&id, false);
     Journal::delete(&journals_dir(&app), &id);
     manager.kick();
     Ok(())
@@ -631,11 +735,16 @@ pub async fn sync_set_folder_enabled(
     enabled: bool,
 ) -> AppResult<()> {
     let mut cfg = AppConfig::load(&app)?;
-    if let Some(f) = cfg.sync_folders.iter_mut().find(|f| f.id == id) {
-        f.enabled = enabled;
-    }
+    let folder = cfg
+        .sync_folders
+        .iter_mut()
+        .find(|f| f.id == id)
+        .ok_or_else(|| AppError::msg("unknown sync folder"))?;
+    folder.enabled = enabled;
     cfg.save(&app)?;
-    manager.kick();
+    // Mirrors the config change into the live engine — this is what cancels an
+    // in-flight sync of the folder instead of letting it run to completion.
+    manager.set_folder_enabled(&id, enabled);
     Ok(())
 }
 

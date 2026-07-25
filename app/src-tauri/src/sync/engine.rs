@@ -18,7 +18,40 @@ use crate::error::{AppError, AppResult};
 use crate::webdav::WebDavClient;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
+
+/// Cooperative cancellation for a running sync (global pause or a per-folder
+/// disable). Checked at every safe point: between directory listings during the
+/// walk, per path while planning, before/around each transfer, and per
+/// deletion — so a pause takes effect within seconds instead of after the run.
+#[derive(Clone)]
+pub struct Cancel(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl Cancel {
+    pub fn new(f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Cancel(Arc::new(f))
+    }
+
+    /// A handle that never cancels (tests, one-shot syncs).
+    pub fn never() -> Self {
+        Cancel(Arc::new(|| false))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        (self.0)()
+    }
+
+    /// Resolves once cancellation is requested — for racing against an
+    /// in-flight transfer with `select!`. Polling (vs. a wakeup channel) keeps
+    /// the flag composable from plain atomics; 250ms is imperceptible next to
+    /// any network transfer.
+    async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+}
 
 /// The action chosen for a path after comparing remote / local / journal.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -111,6 +144,8 @@ pub struct SyncStats {
     pub deleted_local: u32,
     pub deleted_remote: u32,
     pub conflicts: u32,
+    /// Deletions refused by the mass-deletion guard (see [`sync_prepared`]).
+    pub blocked_deletions: u32,
 }
 
 struct RemoteMeta {
@@ -184,6 +219,11 @@ fn is_transient(e: &AppError) -> bool {
 
 /// Max attempts per transfer before giving up.
 const TRANSFER_ATTEMPTS: u32 = 3;
+
+/// The mass-deletion guard only engages from this many planned deletions on
+/// (AND at least half of that side's entries), so ordinary folder deletions
+/// still propagate while a vanished tree cannot wipe the other side.
+const DELETION_GUARD_MIN: usize = 10;
 
 /// Execute one transfer with retries, reporting progress. Emits `file_done` on
 /// success or `file_aborted` on final failure so the UI never shows a stuck
@@ -366,17 +406,18 @@ pub async fn prepare(
     folder: &SyncFolder,
     ignore: &[String],
     reporter: &Reporter,
+    cancel: &Cancel,
 ) -> AppResult<Prepared> {
     let local_root = PathBuf::from(&folder.local_path);
     tokio::fs::create_dir_all(&local_root).await?;
     ensure_remote_dir(client, &folder.remote_path).await?;
 
     let journal = Journal::load(journal_dir, &folder.id)?;
-    let remote = walk_remote(client, &folder.remote_path, |found| {
+    let remote = walk_remote(client, &folder.remote_path, cancel, |found| {
         reporter.scan_progress(&folder.remote_path, found);
     })
     .await?;
-    let local = walk_local(&local_root);
+    let local = walk_local(&local_root)?;
 
     // All paths seen anywhere, sorted so parents precede children.
     let mut keys: BTreeSet<String> = BTreeSet::new();
@@ -416,12 +457,18 @@ pub async fn sync_folder(
     reporter: &Reporter,
     ignore: &[String],
 ) -> AppResult<SyncStats> {
-    let prepared = prepare(journal_dir, client, folder, ignore, reporter).await?;
+    let cancel = Cancel::never();
+    let prepared = prepare(journal_dir, client, folder, ignore, reporter, &cancel).await?;
     reporter.session_plan(prepared.files_total, prepared.bytes_total);
-    sync_prepared(journal_dir, client, folder, prepared, reporter, ignore).await
+    sync_prepared(journal_dir, client, folder, prepared, reporter, ignore, &cancel).await
 }
 
 /// Execute a previously [`prepare`]d sync. Returns per-run statistics.
+///
+/// Cancellation (pause / folder disable) is cooperative: planning stops, no
+/// new transfers start, in-flight ones are aborted (download temps are kept
+/// for resume), and the journal is saved with every untouched path carried
+/// over — so a paused run is indistinguishable from one that never got there.
 pub async fn sync_prepared(
     journal_dir: &Path,
     client: &WebDavClient,
@@ -429,6 +476,7 @@ pub async fn sync_prepared(
     prepared: Prepared,
     reporter: &Reporter,
     ignore: &[String],
+    cancel: &Cancel,
 ) -> AppResult<SyncStats> {
     let local_root = PathBuf::from(&folder.local_path);
     let Prepared { remote, local, journal, keys, .. } = prepared;
@@ -444,6 +492,9 @@ pub async fn sync_prepared(
     let mut since_save = 0usize;
 
     for key in &keys {
+        if cancel.is_cancelled() {
+            break;
+        }
         if is_ignored(key, ignore) {
             continue;
         }
@@ -570,11 +621,25 @@ pub async fn sync_prepared(
             let client = client.clone();
             let reporter = reporter.clone();
             let sem = sem.clone();
+            let cancel = cancel.clone();
             async move {
                 let weight = if item.size > LARGE_FILE_BYTES { 2 } else { 1 };
                 let _permit = sem.acquire_many(weight).await.ok();
-                let outcome = run_transfer(&client, &item, &reporter).await;
-                (item, outcome)
+                // Queued but not yet started when the pause hit — skip quietly.
+                if cancel.is_cancelled() {
+                    return (item, None);
+                }
+                // Race the transfer against cancellation so a pause aborts even
+                // a large in-flight file. An aborted download keeps its temp
+                // (resumed by the next run); an aborted upload only ever
+                // touched a remote `.ncsync-tmp`, which uploads overwrite.
+                tokio::select! {
+                    outcome = run_transfer(&client, &item, &reporter) => (item, Some(outcome)),
+                    _ = cancel.cancelled() => {
+                        reporter.file_aborted(&item.key);
+                        (item, None)
+                    }
+                }
             }
         }))
         // Poll more futures than the budget so freed permits are picked up
@@ -583,7 +648,10 @@ pub async fn sync_prepared(
 
         while let Some((item, outcome)) = stream.next().await {
             match outcome {
-                Ok(entry) => {
+                // Cancelled before/while transferring: recorded by the final
+                // carry-over pass so the next run re-plans this file.
+                None => {}
+                Some(Ok(entry)) => {
                     match item.kind {
                         TransferKind::Upload => stats.uploaded += 1,
                         TransferKind::Download => stats.downloaded += 1,
@@ -591,7 +659,7 @@ pub async fn sync_prepared(
                     }
                     new_journal.entries.insert(item.key.clone(), entry);
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     reporter.error(&item.key, &e.to_string());
                     log::warn!("transfer {}: {e}", item.key);
                 }
@@ -616,7 +684,11 @@ pub async fn sync_prepared(
         // and an interrupted run resumes from wherever it got to.
         let mut results = stream::iter(verify_queue.into_iter().map(|item| {
             let client = client.clone();
+            let cancel = cancel.clone();
             async move {
+                if cancel.is_cancelled() {
+                    return (item, None);
+                }
                 let identical = match checksum_matches(&item.local_full, &item.checksums).await
                 {
                     Some(matched) => Ok(matched),
@@ -626,14 +698,17 @@ pub async fn sync_prepared(
                             .await
                     }
                 };
-                (item, identical)
+                (item, Some(identical))
             }
         }))
         .buffer_unordered(VERIFY_CONCURRENCY);
 
         while let Some((item, outcome)) = results.next().await {
             match outcome {
-                Ok(true) => {
+                // Cancelled before verification: the final carry-over pass
+                // keeps the old journal entry for the next run.
+                None => {}
+                Some(Ok(true)) => {
                     record(
                         &mut new_journal,
                         &item.key,
@@ -644,7 +719,7 @@ pub async fn sync_prepared(
                     );
                     reporter.verify_done(&item.key, item.size);
                 }
-                Ok(false) => {
+                Some(Ok(false)) => {
                     // Genuinely diverging content — download remote to a temp
                     // file and only preserve+swap the local copy on success, so
                     // a failed download never orphans the original or spawns a
@@ -681,7 +756,7 @@ pub async fn sync_prepared(
                         }
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     reporter.error(&item.key, &e.to_string());
                     log::warn!("verify {}: {e}", item.key);
                 }
@@ -696,9 +771,54 @@ pub async fn sync_prepared(
         }
     }
 
+    // ── Mass-deletion guard ────────────────────────────────────────────────
+    // A sweep that would delete most of one side is state loss (an unmounted
+    // disk, a renamed or emptied local folder, a server answering with a
+    // hollow tree) — not intent. Refuse it and drop the affected journal
+    // entries: the next run then sees the surviving files as unknown and
+    // RESTORES them on the missing side instead. When in doubt this engine
+    // may re-transfer files; it must never mass-delete them.
+    let sweep = |planned: usize, side_total: usize| {
+        planned >= DELETION_GUARD_MIN && planned * 2 >= side_total
+    };
+    if sweep(delete_remote.len(), remote.len()) {
+        log::warn!(
+            "{}: refusing to delete {}/{} remote entries — local side looks lost",
+            folder.remote_path,
+            delete_remote.len(),
+            remote.len()
+        );
+        reporter.error(
+            &folder.remote_path,
+            "mass deletion refused: the local folder looks missing or emptied — server files kept, they will be restored locally",
+        );
+        stats.blocked_deletions += delete_remote.len() as u32;
+        delete_remote.clear();
+    }
+    if sweep(delete_local.len(), local.len()) {
+        log::warn!(
+            "{}: refusing to delete {}/{} local entries — remote side looks lost",
+            folder.remote_path,
+            delete_local.len(),
+            local.len()
+        );
+        reporter.error(
+            &folder.remote_path,
+            "mass deletion refused: the server folder looks missing or emptied — local files kept, they will be restored remotely",
+        );
+        stats.blocked_deletions += delete_local.len() as u32;
+        delete_local.clear();
+    }
+
     // Apply deletions child-first (reverse sorted order), so a folder's own
     // entries are gone before we reach the folder itself.
     for key in delete_remote.into_iter().rev() {
+        // A deletion skipped by a pause keeps its journal entry (final
+        // carry-over) — without it the next run would see an unknown remote
+        // file and download it back instead of finishing the delete.
+        if cancel.is_cancelled() {
+            continue;
+        }
         let full = remote_join(&folder.remote_path, &key);
         // A directory delete is recursive on the server, so only issue it once
         // the folder is actually empty — anything still inside was added
@@ -712,6 +832,9 @@ pub async fn sync_prepared(
         }
     }
     for key in delete_local.into_iter().rev() {
+        if cancel.is_cancelled() {
+            continue;
+        }
         let path = local_root.join(&key);
         // Non-recursive for directories: it fails (and the folder is kept) if a
         // locally-added file still sits inside, mirroring the remote guard.
@@ -723,6 +846,19 @@ pub async fn sync_prepared(
         if res.is_ok() {
             reporter.deleted(&key, false);
             stats.deleted_local += 1;
+        }
+    }
+
+    // A cancelled run may not have reached every planned path. Carry the old
+    // journal entry for anything the run didn't get to (fresh results above
+    // always win), so untouched divergences — pending deletions included —
+    // are re-planned identically next run instead of being misread as new.
+    if cancel.is_cancelled() {
+        for (key, entry) in &journal.entries {
+            new_journal
+                .entries
+                .entry(key.clone())
+                .or_insert_with(|| entry.clone());
         }
     }
 
@@ -744,6 +880,7 @@ const WALK_CONCURRENCY: usize = 6;
 async fn walk_remote(
     client: &WebDavClient,
     base: &str,
+    cancel: &Cancel,
     mut on_progress: impl FnMut(u64),
 ) -> AppResult<HashMap<String, RemoteMeta>> {
     use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -760,6 +897,12 @@ async fn walk_remote(
     };
 
     while !pending.is_empty() || !inflight.is_empty() {
+        // A partial tree must never be mistaken for a complete one (missing
+        // remote entries would classify as local-only additions), so a pause
+        // aborts the walk with an error the runner recognizes as cancellation.
+        if cancel.is_cancelled() {
+            return Err(AppError::msg("sync cancelled"));
+        }
         while inflight.len() < WALK_CONCURRENCY {
             match pending.pop() {
                 Some(dir) => inflight.push(spawn(dir)),
@@ -805,14 +948,28 @@ async fn walk_remote(
     Ok(out)
 }
 
-fn walk_local(root: &Path) -> HashMap<String, LocalMeta> {
+/// Walk the local tree. Errors are propagated, not swallowed: an unreadable
+/// directory silently skipped here would downstream read as "the user deleted
+/// all of this" and propagate a deletion sweep to the server. The only
+/// tolerated failure is a path vanishing mid-walk (equivalent to it being
+/// deleted a moment later).
+fn walk_local(root: &Path) -> AppResult<HashMap<String, LocalMeta>> {
+    fn vanished(e: &walkdir::Error) -> bool {
+        e.io_error().map_or(false, |io| io.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    // Probe the root explicitly — WalkDir would yield a single error entry,
+    // but the message ("cannot read local folder") matters more than that.
+    std::fs::read_dir(root)
+        .map_err(|e| AppError::msg(format!("cannot read local folder {}: {e}", root.display())))?;
+
     let mut out = HashMap::new();
-    for entry in WalkDir::new(root)
-        .min_depth(1)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(root).min_depth(1).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) if vanished(&e) => continue,
+            Err(e) => return Err(AppError::msg(format!("local scan failed: {e}"))),
+        };
         let rel = match entry.path().strip_prefix(root) {
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
@@ -820,7 +977,11 @@ fn walk_local(root: &Path) -> HashMap<String, LocalMeta> {
         if rel.is_empty() || is_conflicted(&rel) || rel.ends_with(TMP_SUFFIX) {
             continue;
         }
-        let Ok(md) = entry.metadata() else { continue };
+        let md = match entry.metadata() {
+            Ok(md) => md,
+            Err(e) if vanished(&e) => continue,
+            Err(e) => return Err(AppError::msg(format!("local scan failed for {rel}: {e}"))),
+        };
         let is_dir = md.is_dir();
         let mtime = md
             .modified()
@@ -837,7 +998,7 @@ fn walk_local(root: &Path) -> HashMap<String, LocalMeta> {
             },
         );
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +1019,33 @@ fn local_mtime(path: &Path) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Pick a remote path for a NEW folder pair that cannot absorb unrelated
+/// pre-existing server data: the desired path if it is free or an empty
+/// folder, else `"<path> 2"`, `"<path> 3"`, … A local folder paired with an
+/// already-populated same-name server folder must become a second version
+/// beside it — never merge into (or later delete from) data it didn't create.
+/// Pulling an existing server folder down deliberately bypasses this.
+pub async fn unique_remote_path(client: &WebDavClient, desired: &str) -> AppResult<String> {
+    let base = format!("/{}", desired.trim_matches('/'));
+    if base == "/" {
+        return Ok(base); // pairing the account root is always explicit
+    }
+    for n in 1..100u32 {
+        let candidate = if n == 1 { base.clone() } else { format!("{base} {n}") };
+        match client.stat(&candidate).await? {
+            None => return Ok(candidate),
+            Some(entry) if entry.is_dir => {
+                // An empty folder holds nothing to absorb — safe to use.
+                if client.list(&candidate).await?.is_empty() {
+                    return Ok(candidate);
+                }
+            }
+            Some(_) => {} // a file by that name: keep probing suffixes
+        }
+    }
+    Err(AppError::msg(format!("no free remote folder name found for {base}")))
 }
 
 /// Create a remote collection and all of its ancestors (idempotent).
@@ -1022,6 +1210,83 @@ mod tests {
         assert_eq!(classify(Some(&rdir("E1")), Some(&ldir()), Some(&jdir("E0"))), Decision::None);
     }
 
+    fn rfile(etag: &str, size: u64) -> RemoteMeta {
+        RemoteMeta { is_dir: false, size, etag: Some(etag.into()), checksums: None }
+    }
+    fn lfile(size: u64, mtime: i64) -> LocalMeta {
+        LocalMeta { is_dir: false, size, mtime }
+    }
+    fn jfile(etag: &str, size: u64, mtime: i64) -> JournalEntry {
+        JournalEntry { is_dir: false, etag: Some(etag.into()), size, local_mtime: mtime }
+    }
+
+    /// The full reconciliation matrix for a file, spelled out. The invariants
+    /// that keep data safe: nothing is EVER deleted without a journal entry
+    /// proving the surviving side is unchanged since the last sync, and an
+    /// unknown pair (no journal) always merges — never deletes.
+    #[test]
+    fn classify_file_matrix() {
+        // Fresh pair (no journal): both sides merge.
+        assert_eq!(classify(Some(&rfile("E", 1)), None, None), Decision::Download,
+            "unknown remote file downloads");
+        assert_eq!(classify(None, Some(&lfile(1, 10)), None), Decision::Upload,
+            "unknown local file uploads");
+        assert_eq!(classify(Some(&rfile("E", 1)), Some(&lfile(1, 10)), None), Decision::Conflict,
+            "unknown on both sides goes through conflict/verify (identical content is adopted)");
+
+        // Journaled and unchanged: nothing to do.
+        assert_eq!(
+            classify(Some(&rfile("E", 1)), Some(&lfile(1, 10)), Some(&jfile("E", 1, 10))),
+            Decision::None
+        );
+
+        // Exactly one side changed.
+        assert_eq!(
+            classify(Some(&rfile("E2", 1)), Some(&lfile(1, 10)), Some(&jfile("E", 1, 10))),
+            Decision::Download,
+            "remote edit downloads"
+        );
+        assert_eq!(
+            classify(Some(&rfile("E", 1)), Some(&lfile(2, 11)), Some(&jfile("E", 1, 10))),
+            Decision::Upload,
+            "local edit uploads"
+        );
+        assert_eq!(
+            classify(Some(&rfile("E2", 1)), Some(&lfile(2, 11)), Some(&jfile("E", 1, 10))),
+            Decision::Conflict,
+            "both edited -> conflict"
+        );
+
+        // Deletions require an unchanged counterpart; an edit always outranks
+        // a deletion (the survivor is restored, not removed).
+        assert_eq!(
+            classify(None, Some(&lfile(1, 10)), Some(&jfile("E", 1, 10))),
+            Decision::DeleteLocal,
+            "remote deleted, local unchanged -> delete local"
+        );
+        assert_eq!(
+            classify(None, Some(&lfile(2, 11)), Some(&jfile("E", 1, 10))),
+            Decision::Upload,
+            "remote deleted but local edited -> local edit wins, file restored"
+        );
+        assert_eq!(
+            classify(Some(&rfile("E", 1)), None, Some(&jfile("E", 1, 10))),
+            Decision::DeleteRemote,
+            "local deleted, remote unchanged -> delete remote"
+        );
+        assert_eq!(
+            classify(Some(&rfile("E2", 1)), None, Some(&jfile("E", 1, 10))),
+            Decision::Download,
+            "local deleted but remote edited -> remote edit wins, file restored"
+        );
+
+        // Gone on both sides: just forget it.
+        assert_eq!(classify(None, None, Some(&jfile("E", 1, 10))), Decision::None);
+
+        // A file/directory type flip is left alone rather than guessed at.
+        assert_eq!(classify(Some(&rdir("E")), Some(&lfile(1, 10)), None), Decision::None);
+    }
+
     #[test]
     fn rel_to_base_strips_prefix() {
         assert_eq!(rel_to_base("/Music", "/Music/sub/"), "sub");
@@ -1171,9 +1436,17 @@ mod tests {
             self.sync_ignore(&[]).await
         }
         async fn sync_ignore(&self, ig: &[String]) -> SyncStats {
-            sync_folder(&self.jdir, &self.client, &self.folder, &self.reporter, ig)
+            let stats = sync_folder(&self.jdir, &self.client, &self.folder, &self.reporter, ig)
                 .await
-                .unwrap()
+                .unwrap();
+            // Nextcloud file ETags and local mtimes are second-granular. A
+            // test mutation issued immediately after a sync can land in the
+            // same second as the state the journal just recorded, making the
+            // change genuinely undetectable — the scenario then races on a
+            // fast machine (seen as sporadic single-test failures). Step past
+            // the second boundary before handing control back.
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            stats
         }
         async fn r_exists(&self, p: &str) -> bool {
             self.client.stat(&self.rp(p)).await.unwrap().is_some()
@@ -1484,6 +1757,195 @@ mod tests {
 
         e.cleanup().await;
         println!("live_first_sync_preexisting_identical OK");
+    }
+
+    /// Regression for the reported data-loss bug: pairing a local folder with
+    /// a same-name server folder holding DIFFERENT files must merge the two
+    /// sides into a union — and must never delete anything on either side.
+    #[tokio::test]
+    #[ignore]
+    async fn live_first_sync_preexisting_divergent_merge() {
+        let e = LiveEnv::new("merge");
+        // Local tree…
+        std::fs::create_dir_all(e.lp("sub")).unwrap();
+        std::fs::write(e.lp("local-only.txt"), b"mine").unwrap();
+        std::fs::write(e.lp("sub/nested-local.txt"), b"mine2").unwrap();
+        // …and a pre-existing remote tree with entirely different content.
+        e.client.mkcol(&e.remote).await.unwrap();
+        e.client.mkcol(&e.rp("docs")).await.unwrap();
+        e.client.put_bytes(&e.rp("server-only.txt"), b"theirs".to_vec()).await.unwrap();
+        e.client.put_bytes(&e.rp("docs/nested-server.txt"), b"theirs2".to_vec()).await.unwrap();
+
+        let s = e.sync().await;
+        assert_eq!(s.deleted_local + s.deleted_remote, 0, "a first sync must never delete");
+        let union = ["local-only.txt", "sub/nested-local.txt", "server-only.txt", "docs/nested-server.txt"];
+        for p in union {
+            assert!(e.r_exists(p).await, "{p} present on the server");
+            assert!(e.lp(p).exists(), "{p} present locally");
+        }
+        assert_eq!(e.r_bytes("local-only.txt").await, b"mine");
+        assert_eq!(std::fs::read(e.lp("server-only.txt")).unwrap(), b"theirs");
+        // And a second run is a clean no-op.
+        let s2 = e.sync().await;
+        assert_eq!(
+            s2.uploaded + s2.downloaded + s2.deleted_local + s2.deleted_remote + s2.conflicts,
+            0,
+            "converged"
+        );
+
+        e.cleanup().await;
+        println!("live_first_sync_preexisting_divergent_merge OK");
+    }
+
+    /// State loss must read as "restore", never "delete": when the entire
+    /// local folder disappears (unmount, rename, deletion outside the app),
+    /// the mass-deletion guard refuses the server-side sweep, and the next run
+    /// restores the tree locally instead.
+    #[tokio::test]
+    #[ignore]
+    async fn live_local_folder_lost_restores() {
+        let e = LiveEnv::new("lostroot");
+        for i in 0..12 {
+            std::fs::write(e.lp(&format!("f{i:02}.txt")), format!("data-{i}").into_bytes()).unwrap();
+        }
+        let s = e.sync().await;
+        assert_eq!(s.uploaded, 12);
+
+        // The local folder vanishes wholesale (prepare() re-creates it empty).
+        std::fs::remove_dir_all(&e.local).unwrap();
+        let s2 = e.sync().await;
+        assert_eq!(s2.deleted_remote, 0, "guard refused the deletion sweep");
+        assert_eq!(s2.blocked_deletions, 12);
+        for i in 0..12 {
+            assert!(e.r_exists(&format!("f{i:02}.txt")).await, "f{i:02} survived on the server");
+        }
+
+        // Next run: the guarded files' journal entries were dropped, so the
+        // server copies count as new and are restored locally.
+        let s3 = e.sync().await;
+        assert_eq!(s3.downloaded, 12, "server files restored locally");
+        for i in 0..12 {
+            assert!(e.lp(&format!("f{i:02}.txt")).exists(), "f{i:02} restored locally");
+        }
+
+        e.cleanup().await;
+        println!("live_local_folder_lost_restores OK");
+    }
+
+    /// Adding a folder pair whose remote name is already taken by a populated
+    /// folder must NOT pair with it — it becomes a second version ("name 2"),
+    /// and the pre-existing server data stays untouched.
+    #[tokio::test]
+    #[ignore]
+    async fn live_add_folder_dedupes_existing_remote() {
+        let e = LiveEnv::new("dedupe");
+        // Pre-existing, populated server folder under the desired name.
+        e.client.mkcol(&e.remote).await.unwrap();
+        e.client.put_bytes(&e.rp("precious.txt"), b"server data".to_vec()).await.unwrap();
+
+        let unique = unique_remote_path(&e.client, &e.remote).await.unwrap();
+        assert_eq!(unique, format!("{} 2", e.remote), "occupied name gets a ' 2' suffix");
+
+        // Sync the local folder into the deduped path; the original is untouched.
+        std::fs::write(e.lp("mine.txt"), b"local data").unwrap();
+        let mut folder = e.folder.clone();
+        folder.remote_path = unique.clone();
+        sync_folder(&e.jdir, &e.client, &folder, &e.reporter, &[]).await.unwrap();
+        assert_eq!(e.r_bytes("precious.txt").await, b"server data", "pre-existing data untouched");
+        assert!(
+            e.client.stat(&format!("{unique}/mine.txt")).await.unwrap().is_some(),
+            "local file synced into the deduped folder"
+        );
+
+        // An EMPTY existing folder is reused as-is; a free name passes through.
+        let empty = format!("{}_empty", e.remote);
+        e.client.mkcol(&empty).await.unwrap();
+        assert_eq!(unique_remote_path(&e.client, &empty).await.unwrap(), empty);
+        let fresh = format!("{}_fresh", e.remote);
+        assert_eq!(unique_remote_path(&e.client, &fresh).await.unwrap(), fresh);
+
+        let _ = e.client.delete(&unique).await;
+        let _ = e.client.delete(&empty).await;
+        e.cleanup().await;
+        println!("live_add_folder_dedupes_existing_remote OK");
+    }
+
+    /// Pausing a running sync: a cancelled scan aborts (a partial tree must
+    /// never be planned against), a cancelled execution transfers nothing, and
+    /// the next uncancelled run picks the work up exactly where it stopped.
+    #[tokio::test]
+    #[ignore]
+    async fn live_cancel_stops_run_and_resumes() {
+        let e = LiveEnv::new("cancel");
+        std::fs::write(e.lp("a.txt"), b"payload-a").unwrap();
+        std::fs::write(e.lp("b.txt"), b"payload-b").unwrap();
+
+        let cancelled = Cancel::new(|| true);
+        let idle = Cancel::never();
+
+        // Cancelled during the scan → error, no plan.
+        assert!(
+            prepare(&e.jdir, &e.client, &e.folder, &[], &e.reporter, &cancelled).await.is_err(),
+            "a cancelled walk must not produce a (partial) plan"
+        );
+
+        // Cancelled during execution → nothing transferred.
+        let plan =
+            prepare(&e.jdir, &e.client, &e.folder, &[], &e.reporter, &idle).await.unwrap();
+        assert_eq!(plan.files_total, 2);
+        let s = sync_prepared(&e.jdir, &e.client, &e.folder, plan, &e.reporter, &[], &cancelled)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.uploaded + s.downloaded + s.deleted_local + s.deleted_remote,
+            0,
+            "cancelled run transfers nothing"
+        );
+        assert!(!e.r_exists("a.txt").await, "no upload slipped through");
+
+        // The next uncancelled run completes the work.
+        let s2 = e.sync().await;
+        assert_eq!(s2.uploaded, 2, "both files uploaded after resume");
+        assert_eq!(e.r_bytes("a.txt").await, b"payload-a");
+        assert_eq!(e.r_bytes("b.txt").await, b"payload-b");
+
+        e.cleanup().await;
+        println!("live_cancel_stops_run_and_resumes OK");
+    }
+
+    /// Pausing must not corrupt a pending deletion: a delete planned but
+    /// cancelled keeps its journal entry, so the next run finishes the delete
+    /// instead of resurrecting the file from the server.
+    #[tokio::test]
+    #[ignore]
+    async fn live_cancel_preserves_pending_deletion() {
+        let e = LiveEnv::new("canceldel");
+        std::fs::write(e.lp("f.txt"), b"to-be-deleted").unwrap();
+        e.sync().await;
+        assert!(e.r_exists("f.txt").await);
+
+        // Delete locally, then let the propagating run get cancelled right
+        // before the deletion pass executes.
+        std::fs::remove_file(e.lp("f.txt")).unwrap();
+        let idle = Cancel::never();
+        let plan =
+            prepare(&e.jdir, &e.client, &e.folder, &[], &e.reporter, &idle).await.unwrap();
+        let cancelled = Cancel::new(|| true);
+        sync_prepared(&e.jdir, &e.client, &e.folder, plan, &e.reporter, &[], &cancelled)
+            .await
+            .unwrap();
+        assert!(e.r_exists("f.txt").await, "cancelled run must not have deleted remotely yet");
+        assert!(!e.lp("f.txt").exists(), "…nor resurrected the file locally");
+
+        // The resumed run finishes the deletion (the regression would be a
+        // re-download here, because the journal entry was dropped).
+        let s = e.sync().await;
+        assert_eq!(s.downloaded, 0, "file must not be resurrected by re-download");
+        assert!(!e.lp("f.txt").exists());
+        assert!(!e.r_exists("f.txt").await, "deletion completed after resume");
+
+        e.cleanup().await;
+        println!("live_cancel_preserves_pending_deletion OK");
     }
 
     // ---- CalDAV / CardDAV -----------------------------------------------------

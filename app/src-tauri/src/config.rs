@@ -60,6 +60,11 @@ pub fn account_id(server_url: &str, username: &str) -> String {
 }
 
 /// One folder pair kept in sync between the local disk and a server.
+///
+/// Sync is always **two-way** — the reconciliation matrix is hard enough to
+/// get right for one mode, and partial modes multiplied the states in which a
+/// mistake destroys data. (A short-lived `direction` field existed once;
+/// configs that still carry it are read fine — serde ignores unknown fields.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncFolder {

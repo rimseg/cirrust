@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+- **Pausing now actually stops a running sync.** The pause flag used to be read
+  only once, at the start of a round — pausing (or disabling a folder) while a
+  sync was running let every queued transfer finish, potentially gigabytes
+  later, and the Pause button visibly snapped back to unpaused while a run was
+  in flight. Cancellation is now checked throughout the engine: the scan stops,
+  no new transfers start, in-flight transfers are aborted (partially downloaded
+  temps are kept and resumed later), and pending work is journaled so the next
+  run continues exactly where the paused one stopped. The paused state is
+  reported immediately, per-folder pause cancels that folder's in-flight sync
+  too, and pausing no longer blanks the "last sync" timestamp.
+- **Sync is two-way only.** One-way (upload-only / download-only) modes were
+  added during this cycle and removed again before release: partial modes
+  multiply the states in which a reconciliation mistake destroys data. The
+  full two-way decision matrix is now locked down by an exhaustive unit test.
+- **Data-safety guards in the sync engine.**
+  - *Mass-deletion guard:* a deletion sweep that would remove ≥10 entries and
+    at least half of one side is treated as state loss (unmounted disk,
+    renamed or emptied local folder, hollow server answer) — the deletions are
+    refused and the next run **restores** the surviving files to the missing
+    side instead. When in doubt the engine re-transfers; it never mass-deletes.
+  - *No silent local-scan failures:* an unreadable local folder or file now
+    aborts that folder's run with an error instead of being misread as "the
+    user deleted everything".
+  - *New pairs can't absorb existing server data:* adding a folder whose
+    remote name is already taken by a populated server folder now syncs to
+    `"<name> 2"` instead of merging into (and potentially later deleting)
+    unrelated files — like a file manager resolving a name collision. Pulling
+    an existing server folder down via "Folders on your server" pairs with it
+    directly, as intended there.
+- **Unified "Folders" list.** Overview now shows a single list: the cloud's
+  folder tree (navigable) with each folder's sync state overlaid. Folders
+  synced to this computer show their destination, live status and
+  pause/remove controls inline; unsynced ones get a one-click **Sync** that
+  downloads them into `~/Nextcloud/<name>` — the missing "new client" flow.
+  Subfolders of an already-synced pair are marked "synced as part of …"
+  (which also prevents accidentally double-pairing them), and synced pairs
+  not visible at the current browse level are appended so the list is always
+  complete. The "Sync a new folder" form remains for local-first pairs; its
+  local path is free text and is created on first sync.
+- Testing: live suite extended with download-only / upload-only scenario tests
+  and pause-cancellation tests (nothing transfers after a cancel; a pending
+  deletion survives a pause instead of resurrecting the file). Also de-flaked
+  the suite: Nextcloud ETags and local mtimes are second-granular, so a test
+  mutation in the same second as the previous sync was genuinely undetectable —
+  the harness now steps past the second boundary after every sync.
+
 ## 0.1.7 — 2026-07-24
 
 - **Folder deletion now propagates when the folder held files.** Deleting a

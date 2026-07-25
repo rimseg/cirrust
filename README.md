@@ -40,14 +40,28 @@ Plasma, which is the most polished target but not a requirement.
   WebKitGTK, with **fullscreen** (`F` / double-click) and autoplay.
 - **Public links** — create/copy/revoke Nextcloud share links (optional
   password + expiry) via the OCS Sharing API.
-- **Folder sync** — register local↔remote folder pairs kept up to date by a
-  custom Rust WebDAV sync engine (runs in the background via the tray).
+- **Folder sync** — two-way local↔remote folder pairs kept up to date by a
+  custom Rust WebDAV sync engine (runs in the background via the tray). The
+  Overview shows one **Folders** list: your cloud's folder tree with each
+  folder's sync state inline — one-click **Sync** pulls an existing server
+  folder into `~/Nextcloud/<name>` (the fresh-client flow), synced pairs show
+  live status and controls, and subfolders of a synced pair can't be
+  accidentally double-paired. Uploading a local folder whose server name is
+  already taken by other files creates `<name> 2` instead of merging into
+  data it didn't create.
+- **Data-safety guards** — a deletion sweep that would remove most of one side
+  (a vanished/renamed/emptied local folder) is refused and turned into a
+  restore; unreadable local folders abort the run instead of being misread as
+  deletions; nothing is ever deleted without journal proof the other side is
+  unchanged.
 - **Live sync observability** — see the current file, per-file and overall
   progress bars, transfer **speed**, files/bytes done vs. total, and a recent
   **activity feed** (uploads/downloads/deletions/conflicts/errors). Downloads
   stream with live byte progress; the top bar shows a live speed readout.
-- **Sync controls** — global + per-folder pause/resume, ignore patterns
-  (`*.tmp`, `node_modules`, …), and conflict resolution (keep mine / keep server).
+- **Sync controls** — global + per-folder pause/resume that takes effect
+  within seconds (in-flight transfers are cancelled and resume later, not run
+  to completion), ignore patterns (`*.tmp`, `node_modules`, …), and conflict
+  resolution (keep mine / keep server).
 - **Account overview** — storage quota/usage, account + server info, and the
   server-side activity feed (via the OCS API).
 - **Trash bin** — list, restore, delete forever or empty Nextcloud's trash.
@@ -126,6 +140,11 @@ packaging/install-dev-desktop.sh
 ```
 
 On Arch / Manjaro this is the recommended route.
+
+To build the **AppImage itself** locally on a non-Debian host, use
+`packaging/build-appimage.sh` — it works around linuxdeploy's Debian
+assumptions (`NO_STRIP` for `.relr.dyn` sections, staging the GStreamer
+helper binaries) and verifies the bundle afterwards.
 
 ### Uninstall
 
@@ -303,7 +322,16 @@ tests are `#[ignore]` by default (they need a reachable server) and cover:
   same-size identical content that *is* adopted (`live_file_same_size_identical_adopted`),
   delete-vs-modify where the surviving edit wins (`live_delete_vs_modify`), and
   pairing a folder that already holds identical content on both sides
-  (`live_first_sync_preexisting_identical`). Directories: empty create/delete both
+  (`live_first_sync_preexisting_identical`). **Data safety:** pairing same-name
+  folders with *different* content merges without deleting
+  (`live_first_sync_preexisting_divergent_merge`), a wholesale-vanished local
+  folder is refused by the mass-deletion guard and restored
+  (`live_local_folder_lost_restores`), and a new pair whose remote name is
+  occupied lands in `"<name> 2"` (`live_add_folder_dedupes_existing_remote`).
+  **Pause/cancel:** a cancelled run transfers nothing and resumes cleanly
+  (`live_cancel_stops_run_and_resumes`), and a pending deletion survives a
+  pause instead of resurrecting the file (`live_cancel_preserves_pending_deletion`).
+  Directories: empty create/delete both
   ways (`live_dir_empty`), **deleting a directory that held files**
   (`live_dir_nonempty_delete`), a locally-deleted folder that gained a file
   remotely being preserved (`live_dir_preserve_remote_addition`), nested-tree
@@ -352,23 +380,43 @@ gdbus call --session --dest org.cirrust.client.Daemon \
 
 ### Sync engine
 
-A journaled, **bidirectional** engine (`src-tauri/src/sync/`):
+A journaled, **two-way** engine (`src-tauri/src/sync/`):
 
 - Three-way diff (remote ETag vs. local size/mtime vs. a per-folder **journal**)
   classifies each path as upload / download / delete-local / delete-remote /
-  conflict. Deletions propagate both ways.
+  conflict. Deletions propagate both ways — but **only** with journal proof
+  that the surviving side is unchanged since the last sync; an edit always
+  outranks a deletion (the file is restored, not removed). The whole decision
+  matrix is pinned by an exhaustive unit test (`classify_file_matrix`).
 - **Conflicts** (both sides changed) keep the local edit as
   `name (conflicted copy DATE).ext` and take the server's version — matching the
   official client.
-- Runs on startup, every 60s, on demand (`sync_now` / tray / widget), and
-  reacts to local changes via an **inotify** watcher (`notify` crate, debounced).
+- Runs on startup, every ~5 min (remote poll), on demand (`sync_now` / tray /
+  widget), and reacts to local changes instantly via an **inotify** watcher
+  (`notify` crate, debounced).
+- **Pause is immediate**: a cooperative cancel is checked throughout the run —
+  the scan stops, queued transfers are skipped, in-flight ones are aborted
+  (partial download temps are kept and resumed), and untouched paths keep
+  their journal entries so the next run continues exactly where the paused
+  one stopped. Disabling (or removing) a single folder cancels its in-flight
+  sync the same way.
 - Live `SyncStatus` is pushed to the UI (`sync://status` event) and to the
   Plasma widget over D-Bus.
 - Runs in the background via the tray after the window is closed.
 
+**Data-safety guards.** A deletion sweep that would remove ≥10 entries *and*
+at least half of one side is treated as state loss (unmounted disk, renamed or
+emptied local folder) — it is refused, and the next run *restores* the
+surviving files to the missing side instead. An unreadable local folder aborts
+that folder's run rather than being misread as "everything was deleted". And a
+new pair whose remote name is already occupied by a populated folder syncs to
+`"<name> 2"` instead of absorbing data it didn't create. When in doubt the
+engine re-transfers files; it never mass-deletes.
+
 Files that exist with **identical content on both sides** (e.g. on the first
 sync of a folder that already lives on both ends) are adopted silently — only
-genuinely diverging content produces a conflict.
+genuinely diverging content produces a conflict; a first sync of two sides
+holding *different* content merges them into a union without deleting anything.
 
 Directory deletions propagate in both directions whether the folder was empty or
 still held files; a folder is only removed once it is actually empty, so a file

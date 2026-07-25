@@ -57,11 +57,17 @@ export const useSyncStore = defineStore("sync", () => {
     folderStats.value = await sync.folderStats();
   }
 
-  async function addFolder(localPath: string, remotePath: string, accountId: string | null) {
-    const folder = await sync.addFolder(localPath, remotePath, accountId);
+  async function addFolder(
+    localPath: string,
+    remotePath: string,
+    accountId: string | null,
+    mergeExisting = false,
+  ): Promise<SyncFolder> {
+    const folder = await sync.addFolder(localPath, remotePath, accountId, mergeExisting);
     folders.value.push(folder);
     await refreshFolders();
     await refreshStatus();
+    return folder;
   }
 
   async function removeFolder(id: string) {

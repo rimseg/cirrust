@@ -75,7 +75,7 @@ Args below omit the injected `AppHandle` / `State` handles. **48 commands.**
 |---|---|---|
 | `sync_list_folders` | — | `SyncFolder[]` |
 | `sync_folder_stats` | — | `FolderStat[]` |
-| `sync_add_folder` | `localPath`, `remotePath`, `accountId?` | `SyncFolder` |
+| `sync_add_folder` | `localPath`, `remotePath`, `accountId?`, `mergeExisting?` | `SyncFolder` |
 | `sync_remove_folder` | `id` | — |
 | `sync_status` | — | `SyncStatus` |
 | `sync_progress` | — | `SyncProgress` |
@@ -156,9 +156,10 @@ daemon/instance-guard, and the tray.
 
 ## Frontend (`app/src`)
 
-- **views/**: `LoginView`, `OverviewView` (dashboard + synced-folder management +
-  theme switch), `FilesView` (tree browser), `CalendarView` (agenda + month),
-  `ContactsView`, `TrashView`.
+- **views/**: `LoginView`, `OverviewView` (dashboard + the unified **Folders**
+  list — the server's folder tree with per-folder sync state, one-click sync of
+  existing server folders, pause/remove controls — + theme switch), `FilesView`
+  (tree browser), `CalendarView` (agenda + month), `ContactsView`, `TrashView`.
 - **components/**: `TopBar` (nav + account switcher), `PlayerBar` (bottom audio
   player; global Space play/pause), `FilePreview` (image gallery + filmstrip,
   video, PDF, text), `ShareDialog`, `DatePicker` (custom teleported popover).
@@ -205,6 +206,33 @@ Byte-identical files on both sides are adopted silently; genuine divergence yiel
 official client). Runs on startup, every ~5 min, on demand (`sync_now` / tray /
 widget), and reacts to local changes via an inotify watcher. Live `SyncStatus` /
 `SyncProgress` feed the UI (`sync://` events) and the panel widgets (D-Bus).
+
+Sync is **two-way only** — one-way modes existed briefly and were removed:
+partial modes multiplied the states in which a mistake destroys data, and the
+reconciliation matrix is hard enough to keep provably safe for one mode
+(`classify_file_matrix` in `engine.rs` documents it exhaustively).
+
+**Data-safety guards** (`engine.rs`): a *mass-deletion guard* refuses any
+deletion sweep that would remove ≥10 entries **and** ≥half of one side —
+a vanished local folder (unmount, rename, emptied tree) reads as state loss,
+the deletions are dropped along with their journal entries, and the next run
+*restores* the surviving files instead. `walk_local` propagates I/O errors
+rather than silently skipping unreadable entries (which would downstream read
+as "the user deleted these"). And `sync_add_folder` (without `mergeExisting`)
+routes a new pair whose remote name is already occupied by a populated folder
+to `"<name> 2"` via `engine::unique_remote_path` — a local-first add can never
+absorb, or later delete, pre-existing server data. Pulling an existing server
+folder down (the **Sync** button in the unified Folders list) passes
+`mergeExisting` and pairs directly.
+
+**Pause/cancellation** is cooperative and immediate: a `Cancel` handle (global
+pause ∥ per-folder disable, composed in `run_all`) is checked between directory
+listings during the walk, per path while planning, around each transfer (an
+in-flight transfer is `select!`-raced against it; download temps survive for
+resume), and per deletion. A cancelled run journals every untouched path
+unchanged, so the next run continues where the paused one stopped.
+`SyncManager::set_paused` publishes the paused status synchronously (the UI
+never waits on the run loop), and status publishes preserve `last_sync`.
 
 ### Theme
 `utils/theme.ts` + `styles.css`: light / dark / system, persisted in `localStorage`

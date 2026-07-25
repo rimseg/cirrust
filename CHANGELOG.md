@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.8 — 2026-07-25
 
 - **Pausing now actually stops a running sync.** The pause flag used to be read
   only once, at the start of a round — pausing (or disabling a folder) while a
@@ -41,12 +41,16 @@
   not visible at the current browse level are appended so the list is always
   complete. The "Sync a new folder" form remains for local-first pairs; its
   local path is free text and is created on first sync.
-- Testing: live suite extended with download-only / upload-only scenario tests
-  and pause-cancellation tests (nothing transfers after a cancel; a pending
-  deletion survives a pause instead of resurrecting the file). Also de-flaked
-  the suite: Nextcloud ETags and local mtimes are second-granular, so a test
-  mutation in the same second as the previous sync was genuinely undetectable —
-  the harness now steps past the second boundary after every sync.
+- Testing: live suite extended with the data-safety scenarios (same-name
+  divergent merge, a wholesale-vanished folder on either side, remote-name
+  dedupe) and pause-cancellation tests (nothing transfers after a cancel; a
+  pending deletion survives a pause instead of resurrecting the file); unit
+  tests pin the full two-way decision matrix, the mass-deletion-guard
+  thresholds, and that an unreadable local folder errors instead of reading as
+  deletions. Also de-flaked the suite: Nextcloud ETags and local mtimes are
+  second-granular, so a test mutation in the same second as the previous sync
+  was genuinely undetectable — the harness now steps past the second boundary
+  after every sync.
 
 ## 0.1.7 — 2026-07-24
 

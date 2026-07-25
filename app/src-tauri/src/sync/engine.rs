@@ -225,6 +225,13 @@ const TRANSFER_ATTEMPTS: u32 = 3;
 /// still propagate while a vanished tree cannot wipe the other side.
 const DELETION_GUARD_MIN: usize = 10;
 
+/// Should a planned deletion sweep be refused as probable state loss?
+/// True when it would remove at least [`DELETION_GUARD_MIN`] entries AND at
+/// least half of that side. Boundaries are pinned by unit tests.
+fn deletion_sweep_suspicious(planned: usize, side_total: usize) -> bool {
+    planned >= DELETION_GUARD_MIN && planned * 2 >= side_total
+}
+
 /// Execute one transfer with retries, reporting progress. Emits `file_done` on
 /// success or `file_aborted` on final failure so the UI never shows a stuck
 /// in-flight file.
@@ -778,10 +785,7 @@ pub async fn sync_prepared(
     // entries: the next run then sees the surviving files as unknown and
     // RESTORES them on the missing side instead. When in doubt this engine
     // may re-transfer files; it must never mass-delete them.
-    let sweep = |planned: usize, side_total: usize| {
-        planned >= DELETION_GUARD_MIN && planned * 2 >= side_total
-    };
-    if sweep(delete_remote.len(), remote.len()) {
+    if deletion_sweep_suspicious(delete_remote.len(), remote.len()) {
         log::warn!(
             "{}: refusing to delete {}/{} remote entries — local side looks lost",
             folder.remote_path,
@@ -795,7 +799,7 @@ pub async fn sync_prepared(
         stats.blocked_deletions += delete_remote.len() as u32;
         delete_remote.clear();
     }
-    if sweep(delete_local.len(), local.len()) {
+    if deletion_sweep_suspicious(delete_local.len(), local.len()) {
         log::warn!(
             "{}: refusing to delete {}/{} local entries — remote side looks lost",
             folder.remote_path,
@@ -1285,6 +1289,44 @@ mod tests {
 
         // A file/directory type flip is left alone rather than guessed at.
         assert_eq!(classify(Some(&rdir("E")), Some(&lfile(1, 10)), None), Decision::None);
+    }
+
+    // The mass-deletion guard boundaries: ordinary deletions (below the
+    // minimum, or a small share of a big tree) propagate; a sweep of at least
+    // DELETION_GUARD_MIN entries covering >= half of one side is refused.
+    #[test]
+    fn deletion_guard_boundaries() {
+        assert!(!deletion_sweep_suspicious(0, 0), "empty plan is never suspicious");
+        assert!(!deletion_sweep_suspicious(9, 9), "below the minimum always propagates (even 100%)");
+        assert!(deletion_sweep_suspicious(10, 10), "wholesale wipe at the minimum is refused");
+        assert!(deletion_sweep_suspicious(10, 20), "exactly half is refused");
+        assert!(!deletion_sweep_suspicious(10, 21), "just under half propagates");
+        assert!(!deletion_sweep_suspicious(50, 1000), "a small share of a big tree propagates");
+        assert!(deletion_sweep_suspicious(600, 1000), "most of a big tree is refused");
+    }
+
+    // An unreadable directory must abort the local walk with an error — a
+    // silently-skipped subtree would downstream classify as "the user deleted
+    // all of this" and propagate a deletion sweep.
+    #[test]
+    fn walk_local_errors_on_unreadable_subdir() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("cirwalk_{}", std::process::id()));
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(root.join("ok.txt"), b"x").unwrap();
+        std::fs::write(locked.join("hidden.txt"), b"y").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = walk_local(&root);
+
+        // Restore permissions before asserting so cleanup always succeeds.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        if matches!(std::fs::metadata("/proc/self").map(|m| m.uid()), Ok(0)) {
+            return; // root ignores permission bits — the scenario can't be built
+        }
+        assert!(result.is_err(), "unreadable subdir must error, not read as deletions");
     }
 
     #[test]
@@ -1832,6 +1874,39 @@ mod tests {
         println!("live_local_folder_lost_restores OK");
     }
 
+    /// Mirror of the lost-local case: the entire REMOTE folder disappears
+    /// (deleted server-side, out from under the pair). The guard refuses the
+    /// local deletion sweep, and the next run restores the tree to the server.
+    #[tokio::test]
+    #[ignore]
+    async fn live_remote_folder_lost_restores() {
+        let e = LiveEnv::new("lostremote");
+        for i in 0..12 {
+            std::fs::write(e.lp(&format!("f{i:02}.txt")), format!("data-{i}").into_bytes()).unwrap();
+        }
+        assert_eq!(e.sync().await.uploaded, 12);
+
+        // The remote collection vanishes wholesale (prepare() re-creates it empty).
+        e.client.delete(&e.remote).await.unwrap();
+        let s2 = e.sync().await;
+        assert_eq!(s2.deleted_local, 0, "guard refused the local deletion sweep");
+        assert_eq!(s2.blocked_deletions, 12);
+        for i in 0..12 {
+            assert!(e.lp(&format!("f{i:02}.txt")).exists(), "f{i:02} kept locally");
+        }
+
+        // Next run: the guarded files' journal entries were dropped, so the
+        // local copies count as new and are restored to the server.
+        let s3 = e.sync().await;
+        assert_eq!(s3.uploaded, 12, "local files restored to the server");
+        for i in 0..12 {
+            assert!(e.r_exists(&format!("f{i:02}.txt")).await, "f{i:02} restored remotely");
+        }
+
+        e.cleanup().await;
+        println!("live_remote_folder_lost_restores OK");
+    }
+
     /// Adding a folder pair whose remote name is already taken by a populated
     /// folder must NOT pair with it — it becomes a second version ("name 2"),
     /// and the pre-existing server data stays untouched.
@@ -1863,9 +1938,18 @@ mod tests {
         assert_eq!(unique_remote_path(&e.client, &empty).await.unwrap(), empty);
         let fresh = format!("{}_fresh", e.remote);
         assert_eq!(unique_remote_path(&e.client, &fresh).await.unwrap(), fresh);
+        // A FILE occupying the name is stepped over too.
+        let taken_by_file = format!("{}_file", e.remote);
+        e.client.put_bytes(&taken_by_file, b"i am a file".to_vec()).await.unwrap();
+        assert_eq!(
+            unique_remote_path(&e.client, &taken_by_file).await.unwrap(),
+            format!("{taken_by_file} 2"),
+            "a file with the desired name forces the suffix"
+        );
 
         let _ = e.client.delete(&unique).await;
         let _ = e.client.delete(&empty).await;
+        let _ = e.client.delete(&taken_by_file).await;
         e.cleanup().await;
         println!("live_add_folder_dedupes_existing_remote OK");
     }

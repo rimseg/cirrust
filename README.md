@@ -324,10 +324,11 @@ tests are `#[ignore]` by default (they need a reachable server) and cover:
   pairing a folder that already holds identical content on both sides
   (`live_first_sync_preexisting_identical`). **Data safety:** pairing same-name
   folders with *different* content merges without deleting
-  (`live_first_sync_preexisting_divergent_merge`), a wholesale-vanished local
-  folder is refused by the mass-deletion guard and restored
-  (`live_local_folder_lost_restores`), and a new pair whose remote name is
-  occupied lands in `"<name> 2"` (`live_add_folder_dedupes_existing_remote`).
+  (`live_first_sync_preexisting_divergent_merge`), a wholesale-vanished folder
+  on either side is refused by the mass-deletion guard and restored
+  (`live_local_folder_lost_restores`, `live_remote_folder_lost_restores`), and
+  a new pair whose remote name is occupied — by a folder or a file — lands in
+  `"<name> 2"` (`live_add_folder_dedupes_existing_remote`).
   **Pause/cancel:** a cancelled run transfers nothing and resumes cleanly
   (`live_cancel_stops_run_and_resumes`), and a pending deletion survives a
   pause instead of resurrecting the file (`live_cancel_preserves_pending_deletion`).

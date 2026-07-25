@@ -288,14 +288,32 @@ incremental.
 
 ### Verified against a live Nextcloud
 
-The client is tested end-to-end against a real Nextcloud server (`cargo
-test ... -- --ignored`): WebDAV round-trip incl. rename (`live_roundtrip`),
-bidirectional sync with deletion propagation + idempotency
-(`live_sync_bidirectional`), ranged GET (`live_range`), OCS quota/status
-(`live_ocs_user`), share create/list/revoke (`live_share`) and trash
-delete→restore (`live_trash_roundtrip`).
+The client is tested end-to-end against a real Nextcloud server. The `live_*`
+tests are `#[ignore]` by default (they need a reachable server) and cover:
 
-Run them with credentials in the environment:
+- **WebDAV** round-trip incl. rename (`live_roundtrip`), ranged GET
+  (`live_range`), OCS quota/status (`live_ocs_user`), share create/list/revoke
+  (`live_share`), trash delete→restore (`live_trash_roundtrip`).
+- **Sync engine**, the full reconcile matrix: bidirectional file
+  create/modify/delete with deletion propagation + idempotency + identical-content
+  adoption (`live_sync_bidirectional`), one-sided edits both directions
+  (`live_file_modify`), diverging-edit conflict with a conflicted-copy
+  (`live_file_conflict`), empty-directory create/delete both ways
+  (`live_dir_empty`), **deleting a directory that held files**
+  (`live_dir_nonempty_delete`), a locally-deleted folder that gained a file
+  remotely being preserved (`live_dir_preserve_remote_addition`), nested-tree
+  deletion (`live_dir_nested_delete`), and ignore patterns
+  (`live_ignore_patterns`).
+
+**Before tagging a release, run the whole suite green.** The runner spins up a
+throwaway Nextcloud in Docker, runs the `live_*` tests and tears it down:
+
+```bash
+packaging/live-tests.sh          # up, test, down
+packaging/live-tests.sh --keep   # leave the container up afterwards
+```
+
+Or point the tests at your own server:
 
 ```bash
 cd app/src-tauri
@@ -340,11 +358,9 @@ Files that exist with **identical content on both sides** (e.g. on the first
 sync of a folder that already lives on both ends) are adopted silently — only
 genuinely diverging content produces a conflict.
 
-**Known limit — deleting a folder that still held files.** The files are removed
-on the other side, but the now-empty folder is left behind on both ends. The
-journal stores the remote folder's ETag, and uploading a file into it had
-already changed that ETag, so on deletion the folder no longer looks untouched
-and gets re-created instead of removed. Deleting an *empty* folder does
-propagate in both directions — so deleting the leftover once finishes the job.
+Directory deletions propagate in both directions whether the folder was empty or
+still held files; a folder is only removed once it is actually empty, so a file
+added on the far side after you deleted the folder locally is preserved rather
+than swept away. (Covered by the `live_dir_*` tests.)
 
 See `docs/ARCHITECTURE.md` for the command surface and design notes.

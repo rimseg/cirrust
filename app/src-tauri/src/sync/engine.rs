@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// The action chosen for a path after comparing remote / local / journal.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Decision {
     None,
     Download,
@@ -52,28 +52,56 @@ fn classify(r: Option<&RemoteMeta>, l: Option<&LocalMeta>, j: Option<&JournalEnt
             }
         }
         (Some(r), None) => {
-            let unchanged = j.map_or(false, |j| j.etag == r.etag && j.is_dir == r.is_dir);
-            if j.is_some() && unchanged {
-                Decision::DeleteRemote
-            } else if r.is_dir {
-                Decision::MkdirLocal
+            if r.is_dir {
+                // A directory's ETag changes whenever its children change, so it
+                // can't distinguish "modified" from "same folder, different
+                // contents" — comparing it made a folder that ever held files
+                // look changed, so a local deletion re-created it instead of
+                // removing it. Decide by whether we knew the folder: known and
+                // gone locally = the user deleted it → remove it remotely
+                // (execution only removes it once empty, so a child added
+                // remotely is preserved); unknown = a remote addition → mirror.
+                if j.map_or(false, |j| j.is_dir) {
+                    Decision::DeleteRemote
+                } else {
+                    Decision::MkdirLocal
+                }
             } else {
-                Decision::Download
+                let unchanged = j.map_or(false, |j| j.etag == r.etag && !j.is_dir);
+                if unchanged {
+                    Decision::DeleteRemote
+                } else {
+                    Decision::Download
+                }
             }
         }
         (None, Some(l)) => {
-            let unchanged =
-                j.map_or(false, |j| j.size == l.size && j.local_mtime == l.mtime && j.is_dir == l.is_dir);
-            if j.is_some() && unchanged {
-                Decision::DeleteLocal
-            } else if l.is_dir {
-                Decision::MkdirRemote
+            if l.is_dir {
+                if j.map_or(false, |j| j.is_dir) {
+                    Decision::DeleteLocal
+                } else {
+                    Decision::MkdirRemote
+                }
             } else {
-                Decision::Upload
+                let unchanged =
+                    j.map_or(false, |j| j.size == l.size && j.local_mtime == l.mtime && !j.is_dir);
+                if unchanged {
+                    Decision::DeleteLocal
+                } else {
+                    Decision::Upload
+                }
             }
         }
         (None, None) => Decision::None,
     }
+}
+
+/// Whether a remote directory has no children. `list` (PROPFIND depth 1) already
+/// excludes the collection itself, so an empty folder yields no entries. On a
+/// listing error we answer `false` — better to leave a folder in place than to
+/// risk a recursive delete of something we couldn't see.
+async fn remote_dir_empty(client: &WebDavClient, path: &str) -> bool {
+    matches!(client.list(path).await, Ok(entries) if entries.is_empty())
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -668,17 +696,27 @@ pub async fn sync_prepared(
         }
     }
 
-    // Apply deletions child-first (reverse sorted order).
+    // Apply deletions child-first (reverse sorted order), so a folder's own
+    // entries are gone before we reach the folder itself.
     for key in delete_remote.into_iter().rev() {
-        if client.delete(&remote_join(&folder.remote_path, &key)).await.is_ok() {
+        let full = remote_join(&folder.remote_path, &key);
+        // A directory delete is recursive on the server, so only issue it once
+        // the folder is actually empty — anything still inside was added
+        // remotely and must be kept, not swept away with the folder.
+        if remote.get(&key).map_or(false, |r| r.is_dir) && !remote_dir_empty(client, &full).await {
+            continue;
+        }
+        if client.delete(&full).await.is_ok() {
             reporter.deleted(&key, true);
             stats.deleted_remote += 1;
         }
     }
     for key in delete_local.into_iter().rev() {
         let path = local_root.join(&key);
+        // Non-recursive for directories: it fails (and the folder is kept) if a
+        // locally-added file still sits inside, mirroring the remote guard.
         let res = if path.is_dir() {
-            tokio::fs::remove_dir_all(&path).await
+            tokio::fs::remove_dir(&path).await
         } else {
             tokio::fs::remove_file(&path).await
         };
@@ -942,6 +980,48 @@ fn conflicted_name(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn rdir(etag: &str) -> RemoteMeta {
+        RemoteMeta { is_dir: true, size: 0, etag: Some(etag.into()), checksums: None }
+    }
+    fn ldir() -> LocalMeta {
+        LocalMeta { is_dir: true, size: 0, mtime: 0 }
+    }
+    fn jdir(etag: &str) -> JournalEntry {
+        JournalEntry { is_dir: true, etag: Some(etag.into()), size: 0, local_mtime: 0 }
+    }
+
+    // Regression: a folder that ever held files gets a different remote ETag
+    // than the (empty-folder) ETag recorded in the journal. Deleting it locally
+    // must still delete it remotely — not re-create it — even with that mismatch.
+    #[test]
+    fn deleting_local_dir_with_stale_etag_removes_remote() {
+        // remote etag "E1" (has children) != journal etag "E0" (recorded empty)
+        let d = classify(Some(&rdir("E1")), None, Some(&jdir("E0")));
+        assert_eq!(d, Decision::DeleteRemote, "known folder gone locally -> delete remote");
+    }
+
+    #[test]
+    fn deleting_remote_dir_with_stale_state_removes_local() {
+        let d = classify(None, Some(&ldir()), Some(&jdir("E0")));
+        assert_eq!(d, Decision::DeleteLocal, "known folder gone remotely -> delete local");
+    }
+
+    #[test]
+    fn unknown_remote_dir_is_mirrored_not_deleted() {
+        // No journal entry -> the folder is new remotely, not a local deletion.
+        assert_eq!(classify(Some(&rdir("E1")), None, None), Decision::MkdirLocal);
+    }
+
+    #[test]
+    fn unknown_local_dir_is_mirrored_not_deleted() {
+        assert_eq!(classify(None, Some(&ldir()), None), Decision::MkdirRemote);
+    }
+
+    #[test]
+    fn two_present_dirs_are_left_alone() {
+        assert_eq!(classify(Some(&rdir("E1")), Some(&ldir()), Some(&jdir("E0"))), Decision::None);
+    }
+
     #[test]
     fn rel_to_base_strips_prefix() {
         assert_eq!(rel_to_base("/Music", "/Music/sub/"), "sub");
@@ -1035,6 +1115,257 @@ mod tests {
         let _ = std::fs::remove_dir_all(&local);
         let _ = std::fs::remove_dir_all(&jdir);
         println!("LIVE SYNC OK");
+    }
+
+    // ---- Live scenario suite -------------------------------------------------
+    // Assertion-based, #[ignore] by default (need a reachable Nextcloud). Run
+    // the whole suite via packaging/live-tests.sh, or manually:
+    //   NC_URL=.. NC_USER=.. NC_PASS=.. cargo test live_ -- --ignored --nocapture
+    // Each test uses a unique remote path + journal dir and cleans up after
+    // itself, so they are independent and can run in any order.
+
+    struct LiveEnv {
+        client: WebDavClient,
+        folder: SyncFolder,
+        local: PathBuf,
+        jdir: PathBuf,
+        remote: String,
+        reporter: Reporter,
+        // Keep the event receiver alive so Reporter sends don't error.
+        _rx: tokio::sync::mpsc::UnboundedReceiver<crate::sync::progress::SyncEvent>,
+    }
+
+    impl LiveEnv {
+        fn new(tag: &str) -> Self {
+            use crate::config::{Account, ServerKind};
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let account = Account::new(
+                std::env::var("NC_URL").expect("NC_URL"),
+                std::env::var("NC_USER").expect("NC_USER"),
+                ServerKind::Nextcloud,
+            );
+            let client =
+                WebDavClient::new(&account, std::env::var("NC_PASS").expect("NC_PASS")).unwrap();
+            let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let local = std::env::temp_dir().join(format!("cirlive_{tag}_{uniq}"));
+            let jdir = std::env::temp_dir().join(format!("cirlive_j_{tag}_{uniq}"));
+            std::fs::create_dir_all(&local).unwrap();
+            let remote = format!("/cirlive_{tag}_{uniq}");
+            let folder = SyncFolder {
+                id: format!("live-{tag}"),
+                account_id: account.id.clone(),
+                local_path: local.to_string_lossy().into_owned(),
+                remote_path: remote.clone(),
+                enabled: true,
+            };
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            Self { client, folder, local, jdir, remote, reporter: Reporter::new(tx), _rx }
+        }
+        fn rp(&self, p: &str) -> String {
+            format!("{}/{}", self.remote, p)
+        }
+        fn lp(&self, p: &str) -> PathBuf {
+            self.local.join(p)
+        }
+        async fn sync(&self) -> SyncStats {
+            self.sync_ignore(&[]).await
+        }
+        async fn sync_ignore(&self, ig: &[String]) -> SyncStats {
+            sync_folder(&self.jdir, &self.client, &self.folder, &self.reporter, ig)
+                .await
+                .unwrap()
+        }
+        async fn r_exists(&self, p: &str) -> bool {
+            self.client.stat(&self.rp(p)).await.unwrap().is_some()
+        }
+        async fn r_bytes(&self, p: &str) -> Vec<u8> {
+            self.client.get_bytes(&self.rp(p)).await.unwrap()
+        }
+        async fn cleanup(self) {
+            let _ = self.client.delete(&self.remote).await;
+            let _ = std::fs::remove_dir_all(&self.local);
+            let _ = std::fs::remove_dir_all(&self.jdir);
+        }
+    }
+
+    /// A file changed on one side propagates to the other (both directions).
+    #[tokio::test]
+    #[ignore]
+    async fn live_file_modify() {
+        let e = LiveEnv::new("filemod");
+        std::fs::write(e.lp("f.txt"), b"v1").unwrap();
+        e.sync().await;
+        assert_eq!(e.r_bytes("f.txt").await, b"v1");
+
+        // Local edit -> uploaded.
+        std::fs::write(e.lp("f.txt"), b"v2-local-edit").unwrap();
+        e.sync().await;
+        assert_eq!(e.r_bytes("f.txt").await, b"v2-local-edit", "local edit uploaded");
+
+        // Remote edit -> downloaded.
+        e.client.put_bytes(&e.rp("f.txt"), b"v3-remote-edit".to_vec()).await.unwrap();
+        e.sync().await;
+        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"v3-remote-edit", "remote edit downloaded");
+
+        e.cleanup().await;
+        println!("live_file_modify OK");
+    }
+
+    /// A file edited differently on both sides: the local copy is kept as a
+    /// "conflicted copy" and the server's version is taken.
+    #[tokio::test]
+    #[ignore]
+    async fn live_file_conflict() {
+        let e = LiveEnv::new("conflict");
+        std::fs::write(e.lp("f.txt"), b"base").unwrap();
+        e.sync().await;
+
+        // Diverge on both sides (different sizes -> a genuine conflict, not the
+        // identical-content adoption path).
+        std::fs::write(e.lp("f.txt"), b"local side change").unwrap();
+        e.client.put_bytes(&e.rp("f.txt"), b"remote".to_vec()).await.unwrap();
+        let s = e.sync().await;
+        assert_eq!(s.conflicts, 1, "one conflict recorded");
+
+        // Server version wins for f.txt …
+        assert_eq!(std::fs::read(e.lp("f.txt")).unwrap(), b"remote", "remote version taken");
+        // … and the local edit survives as a conflicted copy.
+        let copy = std::fs::read_dir(&e.local)
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .find(|x| x.file_name().to_string_lossy().contains("conflicted copy"));
+        assert!(copy.is_some(), "local edit preserved as a conflicted copy");
+        assert_eq!(std::fs::read(copy.unwrap().path()).unwrap(), b"local side change");
+
+        e.cleanup().await;
+        println!("live_file_conflict OK");
+    }
+
+    /// Empty directories propagate in both directions — creation and deletion.
+    #[tokio::test]
+    #[ignore]
+    async fn live_dir_empty() {
+        let e = LiveEnv::new("direfempty");
+        std::fs::create_dir_all(e.lp("d")).unwrap();
+        e.sync().await;
+        assert!(e.r_exists("d").await, "empty dir created remotely");
+
+        std::fs::remove_dir(e.lp("d")).unwrap();
+        e.sync().await;
+        assert!(!e.r_exists("d").await, "empty dir deleted remotely");
+
+        // Remote-created empty dir -> local.
+        e.client.mkcol(&e.rp("r")).await.unwrap();
+        e.sync().await;
+        assert!(e.lp("r").is_dir(), "remote empty dir created locally");
+
+        e.client.delete(&e.rp("r")).await.unwrap();
+        e.sync().await;
+        assert!(!e.lp("r").exists(), "remote empty dir deleted locally");
+
+        e.cleanup().await;
+        println!("live_dir_empty OK");
+    }
+
+    /// The fix: deleting a directory that *held files* removes it on the other
+    /// side instead of leaving an empty ghost that gets re-created.
+    #[tokio::test]
+    #[ignore]
+    async fn live_dir_nonempty_delete() {
+        // (a) local deletion -> remote folder gone
+        let e = LiveEnv::new("dirdel_l");
+        std::fs::create_dir_all(e.lp("d")).unwrap();
+        std::fs::write(e.lp("d/x.txt"), b"x").unwrap();
+        e.sync().await;
+        assert!(e.r_exists("d/x.txt").await && e.r_exists("d").await);
+
+        std::fs::remove_dir_all(e.lp("d")).unwrap();
+        e.sync().await;
+        assert!(!e.r_exists("d/x.txt").await, "child gone remotely");
+        assert!(!e.r_exists("d").await, "FOLDER gone remotely (was the bug)");
+        assert!(!e.lp("d").exists(), "folder not re-created locally");
+        // A second run is a no-op (converged).
+        let s2 = e.sync().await;
+        assert_eq!(s2.deleted_local + s2.deleted_remote + s2.uploaded + s2.downloaded, 0);
+        e.cleanup().await;
+
+        // (b) remote deletion -> local folder gone
+        let e = LiveEnv::new("dirdel_r");
+        std::fs::create_dir_all(e.lp("d")).unwrap();
+        std::fs::write(e.lp("d/x.txt"), b"x").unwrap();
+        e.sync().await;
+        e.client.delete(&e.rp("d")).await.unwrap(); // recursive on server
+        e.sync().await;
+        assert!(!e.lp("d/x.txt").exists(), "child gone locally");
+        assert!(!e.lp("d").exists(), "FOLDER gone locally");
+        assert!(!e.r_exists("d").await, "folder not re-created remotely");
+        e.cleanup().await;
+        println!("live_dir_nonempty_delete OK");
+    }
+
+    /// Local folder deleted, but a *new* file was added inside it remotely: the
+    /// folder must be preserved (the new file downloaded), not swept away.
+    #[tokio::test]
+    #[ignore]
+    async fn live_dir_preserve_remote_addition() {
+        let e = LiveEnv::new("dirpreserve");
+        std::fs::create_dir_all(e.lp("d")).unwrap();
+        std::fs::write(e.lp("d/old.txt"), b"old").unwrap();
+        e.sync().await;
+
+        // Delete the folder locally; independently add a file into it remotely.
+        std::fs::remove_dir_all(e.lp("d")).unwrap();
+        e.client.put_bytes(&e.rp("d/new.txt"), b"new".to_vec()).await.unwrap();
+        e.sync().await;
+
+        assert!(e.r_exists("d").await, "folder preserved remotely (holds a new file)");
+        assert!(!e.r_exists("d/old.txt").await, "the file the user deleted is gone");
+        assert!(e.r_exists("d/new.txt").await, "remotely-added file kept");
+        assert_eq!(std::fs::read(e.lp("d/new.txt")).unwrap(), b"new", "new file downloaded locally");
+
+        e.cleanup().await;
+        println!("live_dir_preserve_remote_addition OK");
+    }
+
+    /// A nested tree deleted at its root propagates the whole subtree.
+    #[tokio::test]
+    #[ignore]
+    async fn live_dir_nested_delete() {
+        let e = LiveEnv::new("nested");
+        std::fs::create_dir_all(e.lp("a/b/c")).unwrap();
+        std::fs::write(e.lp("a/top.txt"), b"1").unwrap();
+        std::fs::write(e.lp("a/b/mid.txt"), b"2").unwrap();
+        std::fs::write(e.lp("a/b/c/deep.txt"), b"3").unwrap();
+        e.sync().await;
+        assert!(e.r_exists("a/b/c/deep.txt").await);
+
+        std::fs::remove_dir_all(e.lp("a")).unwrap();
+        e.sync().await;
+        for p in ["a", "a/b", "a/b/c", "a/top.txt", "a/b/mid.txt", "a/b/c/deep.txt"] {
+            assert!(!e.r_exists(p).await, "{p} gone remotely");
+        }
+        e.cleanup().await;
+        println!("live_dir_nested_delete OK");
+    }
+
+    /// Ignored paths are neither uploaded nor deleted.
+    #[tokio::test]
+    #[ignore]
+    async fn live_ignore_patterns() {
+        let e = LiveEnv::new("ignore");
+        let ig = vec!["*.tmp".to_string(), "node_modules".to_string()];
+        std::fs::write(e.lp("keep.txt"), b"k").unwrap();
+        std::fs::write(e.lp("scratch.tmp"), b"t").unwrap();
+        std::fs::create_dir_all(e.lp("node_modules")).unwrap();
+        std::fs::write(e.lp("node_modules/lib.js"), b"j").unwrap();
+        e.sync_ignore(&ig).await;
+
+        assert!(e.r_exists("keep.txt").await, "normal file uploaded");
+        assert!(!e.r_exists("scratch.tmp").await, "*.tmp not uploaded");
+        assert!(!e.r_exists("node_modules").await, "ignored dir not uploaded");
+
+        e.cleanup().await;
+        println!("live_ignore_patterns OK");
     }
 
     #[test]

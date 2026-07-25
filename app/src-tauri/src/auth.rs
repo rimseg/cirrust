@@ -20,25 +20,42 @@ const KEYRING_SERVICE: &str = "org.cirrust.client";
 // Keyring helpers
 // ---------------------------------------------------------------------------
 
+// The keyring's Secret-Service backend talks blocking D-Bus (zbus), and with
+// zbus's tokio feature enabled that spins up a runtime under the hood. Doing
+// that ON a tokio worker panics ("Cannot start a runtime from within a
+// runtime") and silently kills whichever background task made the call — so
+// every keyring operation is pushed onto a dedicated blocking thread.
+
 fn keyring_entry(account: &Account) -> AppResult<keyring::Entry> {
     let user = format!("{}@{}", account.username, account.server_url);
     Ok(keyring::Entry::new(KEYRING_SERVICE, &user)?)
 }
 
-pub fn store_password(account: &Account, password: &str) -> AppResult<()> {
-    keyring_entry(account)?.set_password(password)?;
-    Ok(())
+async fn on_keyring_thread<T: Send + 'static>(
+    account: &Account,
+    op: impl FnOnce(keyring::Entry) -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    let account = account.clone();
+    tokio::task::spawn_blocking(move || op(keyring_entry(&account)?))
+        .await
+        .map_err(|e| AppError::msg(format!("keyring task failed: {e}")))?
 }
 
-pub fn load_password(account: &Account) -> AppResult<String> {
-    Ok(keyring_entry(account)?.get_password()?)
+pub async fn store_password(account: &Account, password: &str) -> AppResult<()> {
+    let password = password.to_string();
+    on_keyring_thread(account, move |entry| Ok(entry.set_password(&password)?)).await
 }
 
-pub fn delete_password(account: &Account) -> AppResult<()> {
-    match keyring_entry(account)?.delete_credential() {
+pub async fn load_password(account: &Account) -> AppResult<String> {
+    on_keyring_thread(account, |entry| Ok(entry.get_password()?)).await
+}
+
+pub async fn delete_password(account: &Account) -> AppResult<()> {
+    on_keyring_thread(account, |entry| match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.into()),
-    }
+    })
+    .await
 }
 
 /// Restore all connected accounts at startup from config + keyring. Best-effort:
@@ -51,7 +68,7 @@ pub async fn restore_sessions(app: &AppHandle, state: &AppState) -> AppResult<us
     let _ = cfg.save(app);
     let mut restored = 0;
     for account in &cfg.accounts {
-        let Ok(password) = load_password(account) else { continue };
+        let Ok(password) = load_password(account).await else { continue };
         let Ok(client) = WebDavClient::new(account, password) else { continue };
         state.add_session(Session { account: account.clone(), client }).await;
         restored += 1;
@@ -179,7 +196,7 @@ pub async fn auth_poll_login(
         ServerKind::Nextcloud,
     );
 
-    store_password(&account, &success.app_password)?;
+    store_password(&account, &success.app_password).await?;
     let client = WebDavClient::new(&account, success.app_password)?;
     state.add_session(Session { account: account.clone(), client }).await;
     persist_account(&app, &account)?;
@@ -214,7 +231,7 @@ pub async fn auth_add_manual(
         other => other,
     })?;
 
-    store_password(&account, &password)?;
+    store_password(&account, &password).await?;
     state.add_session(Session { account: account.clone(), client }).await;
     persist_account(&app, &account)?;
     Ok(account)
@@ -261,7 +278,7 @@ pub async fn auth_remove_account(
 ) -> AppResult<()> {
     let mut cfg = AppConfig::load(&app)?;
     if let Some(account) = cfg.account_by_id(&account_id).cloned() {
-        let _ = delete_password(&account);
+        let _ = delete_password(&account).await;
     }
     state.remove_session(&account_id).await;
 

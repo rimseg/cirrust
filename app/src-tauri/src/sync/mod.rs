@@ -226,7 +226,38 @@ async fn run_loop(
             }
         }
 
-        run_all(&app, &status_tx, &reporter, &paused, &disabled, &online).await;
+        // Panic shield: a panicking run must not kill this loop — that left
+        // the app silently never syncing again until restart. The panic is
+        // reported as a sync error instead, and the loop lives on.
+        let run = std::panic::AssertUnwindSafe(run_all(
+            &app,
+            &status_tx,
+            &reporter,
+            &paused,
+            &disabled,
+            &online,
+        ));
+        if let Err(panic) = futures_util::FutureExt::catch_unwind(run).await {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            log::error!("sync run panicked: {msg}");
+            reporter.session_end();
+            let count = AppConfig::load(&app)
+                .map(|c| c.sync_folders.iter().filter(|f| f.enabled).count())
+                .unwrap_or(0);
+            publish(
+                &app,
+                &status_tx,
+                SyncState::Error,
+                None,
+                Some(format!("internal sync error: {msg}")),
+                count,
+                false,
+            );
+        }
         // Folders may have been added/removed while we ran.
         _watcher = rewatch(&app, &fs_tx);
         // Re-arm the periodic poll to a full period *after* the run finishes, so

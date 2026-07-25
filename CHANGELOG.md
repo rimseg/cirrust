@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Fixed: sync could silently stop working until an app restart.** The OS
+  keyring (Secret Service / KWallet) is driven over blocking D-Bus; calling it
+  from the async runtime panicked ("Cannot start a runtime from within a
+  runtime") and killed whichever background task made the call — session
+  restore among them — after which nothing synced again. All keyring
+  operations now run on dedicated blocking threads. The sync loop additionally
+  gained a panic shield: an unexpected panic inside a run is surfaced as a
+  sync error and the loop keeps running instead of dying silently.
 - **Overlapping folder pairs are refused.** Adding a pair whose remote folder
   (same account) or local folder is already covered by an existing pair —
   identical or nested either way — now fails with a clear error instead of

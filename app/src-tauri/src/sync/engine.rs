@@ -403,6 +403,12 @@ pub struct Prepared {
     keys: BTreeSet<String>,
     pub files_total: u64,
     pub bytes_total: u64,
+    /// Same-size both-sides files headed for the verification pass. Counted
+    /// separately from the transfer plan: they are *compared* (and usually
+    /// adopted in place), not downloaded — showing them as pending download
+    /// volume made a first sync of pre-existing data look like it was
+    /// re-fetching everything.
+    pub verify_files: u64,
 }
 
 /// Walk both sides of a folder pair and tally what a sync would transfer.
@@ -432,25 +438,36 @@ pub async fn prepare(
     keys.extend(local.keys().cloned());
     keys.extend(journal.entries.keys().cloned());
 
-    let (mut files_total, mut bytes_total) = (0u64, 0u64);
+    let (mut files_total, mut bytes_total, mut verify_files) = (0u64, 0u64, 0u64);
     for key in &keys {
         if is_ignored(key, ignore) {
             continue;
         }
-        match classify(remote.get(key), local.get(key), journal.entries.get(key)) {
-            Decision::Download | Decision::Conflict => {
+        let (r, l) = (remote.get(key), local.get(key));
+        match classify(r, l, journal.entries.get(key)) {
+            Decision::Download => {
                 files_total += 1;
-                bytes_total += remote.get(key).map_or(0, |r| r.size);
+                bytes_total += r.map_or(0, |r| r.size);
+            }
+            Decision::Conflict => {
+                // Same-size pairs go to the verification pass (compared, not
+                // transferred) — count them as such, not as download volume.
+                if matches!((r, l), (Some(r), Some(l)) if !r.is_dir && r.size == l.size) {
+                    verify_files += 1;
+                } else {
+                    files_total += 1;
+                    bytes_total += r.map_or(0, |r| r.size);
+                }
             }
             Decision::Upload => {
                 files_total += 1;
-                bytes_total += local.get(key).map_or(0, |l| l.size);
+                bytes_total += l.map_or(0, |l| l.size);
             }
             _ => {}
         }
     }
 
-    Ok(Prepared { remote, local, journal, keys, files_total, bytes_total })
+    Ok(Prepared { remote, local, journal, keys, files_total, bytes_total, verify_files })
 }
 
 /// Convenience wrapper: prepare a single folder, report its plan and sync it.
@@ -466,7 +483,7 @@ pub async fn sync_folder(
 ) -> AppResult<SyncStats> {
     let cancel = Cancel::never();
     let prepared = prepare(journal_dir, client, folder, ignore, reporter, &cancel).await?;
-    reporter.session_plan(prepared.files_total, prepared.bytes_total);
+    reporter.session_plan(prepared.files_total, prepared.bytes_total, prepared.verify_files);
     sync_prepared(journal_dir, client, folder, prepared, reporter, ignore, &cancel).await
 }
 

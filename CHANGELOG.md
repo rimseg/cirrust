@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **First syncs no longer look like a full re-download.** Files that already
+  exist on both sides with the same size are *compared* against the server
+  (and adopted in place when identical), but the progress view planned them as
+  pending downloads — pairing a folder whose content mostly existed on the
+  server showed the full server size as an incoming transfer. Verification now
+  has its own honest readout ("Checking N of M existing files against the
+  server — files are only downloaded if they differ"), and the download
+  totals/progress bar cover only real transfers.
+
 ## 0.1.8 — 2026-07-25
 
 - **Pausing now actually stops a running sync.** The pause flag used to be read

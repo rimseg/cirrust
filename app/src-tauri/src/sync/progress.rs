@@ -48,8 +48,10 @@ pub enum SyncEvent {
     SessionReset,
     /// Scan-phase progress: entries discovered so far in `folder`.
     ScanProgress { folder: String, entries: u64 },
-    /// Additive plan for a folder about to sync.
-    SessionPlan { files: u64, bytes: u64 },
+    /// Additive plan for a folder about to sync. `verify_files` are same-size
+    /// pairs that will be *compared* (usually adopted in place), not
+    /// transferred — kept out of the files/bytes totals.
+    SessionPlan { files: u64, bytes: u64, verify_files: u64 },
     /// End of a run.
     SessionEnd,
     FileStart { path: String, dir: Direction, total: u64 },
@@ -84,8 +86,8 @@ impl Reporter {
     pub fn scan_progress(&self, folder: &str, entries: u64) {
         self.send(SyncEvent::ScanProgress { folder: folder.into(), entries });
     }
-    pub fn session_plan(&self, files: u64, bytes: u64) {
-        self.send(SyncEvent::SessionPlan { files, bytes });
+    pub fn session_plan(&self, files: u64, bytes: u64, verify_files: u64) {
+        self.send(SyncEvent::SessionPlan { files, bytes, verify_files });
     }
     pub fn session_end(&self) {
         self.send(SyncEvent::SessionEnd);
@@ -144,6 +146,10 @@ pub struct Progress {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
+    /// Same-size existing files being compared against the server (adopted in
+    /// place when identical) — separate from the transfer totals above.
+    pub verify_done: u64,
+    pub verify_total: u64,
     /// Bytes per second (exponentially smoothed).
     pub speed: u64,
     /// Estimated seconds until the run finishes, when computable.
@@ -216,12 +222,13 @@ pub async fn consume(
                         p.current_file = folder;
                         p.scanned = entries;
                     }
-                    SyncEvent::SessionPlan { files, bytes } => {
+                    SyncEvent::SessionPlan { files, bytes, verify_files } => {
                         p.active = true;
                         p.phase = "transferring".into();
                         p.current_file.clear();
                         p.files_total += files;
                         p.bytes_total += bytes;
+                        p.verify_total += verify_files;
                     }
                     SyncEvent::SessionEnd => {
                         p.active = false;
@@ -271,8 +278,12 @@ pub async fn consume(
                         );
                     }
                     SyncEvent::VerifyDone { path, size } => {
-                        p.files_done += 1;
-                        p.bytes_done += size;
+                        // Verification is not a transfer: it moves its own
+                        // counter. (It used to add to files/bytes done, which
+                        // together with verify files being planned as
+                        // downloads made a first sync of pre-existing data
+                        // look like it was re-downloading everything.)
+                        p.verify_done += 1;
                         push_activity(&activity, "verified", &path, size, None);
                     }
                     SyncEvent::FileAborted { path } => {

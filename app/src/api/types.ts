@@ -84,6 +84,10 @@ export interface SyncProgress {
   filesTotal: number;
   bytesDone: number;
   bytesTotal: number;
+  /** Same-size existing files compared against the server (adopted in place
+   * when identical) — separate from the transfer totals. */
+  verifyDone: number;
+  verifyTotal: number;
   /** Bytes per second (smoothed). */
   speed: number;
   /** Estimated seconds until the run finishes, when computable. */

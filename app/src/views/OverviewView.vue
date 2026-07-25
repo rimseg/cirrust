@@ -547,12 +547,28 @@ onMounted(async () => {
                   {{ formatSize(f.done) }} / {{ formatSize(f.total) }}
                 </span>
               </div>
-              <p v-if="progress.activeFiles.length === 0" class="text-xs text-ink-soft">
+              <!-- Verification: existing same-size files being compared with
+                   the server — adopted in place, not downloaded. -->
+              <p
+                v-if="progress.verifyTotal > 0 && progress.verifyDone < progress.verifyTotal"
+                class="text-xs text-ink-soft"
+              >
+                Checking {{ progress.verifyDone.toLocaleString() }} of
+                {{ progress.verifyTotal.toLocaleString() }} existing files against the
+                server — files are only downloaded if they differ.
+              </p>
+              <p
+                v-else-if="progress.activeFiles.length === 0"
+                class="text-xs text-ink-soft"
+              >
                 Preparing next files…
               </p>
             </div>
 
-            <div class="mt-3 flex items-baseline justify-between text-xs text-ink-soft">
+            <div
+              v-if="progress.filesTotal > 0"
+              class="mt-3 flex items-baseline justify-between text-xs text-ink-soft"
+            >
               <span>
                 {{ progress.filesDone }} of {{ progress.filesTotal }} files
                 <span v-if="progress.activeFiles.length" class="text-accent">
@@ -565,7 +581,7 @@ onMounted(async () => {
                 <template v-if="progress.etaSecs != null"> · {{ fmtEta(progress.etaSecs) }}</template>
               </span>
             </div>
-            <div class="mt-1 h-2 overflow-hidden rounded-full bg-line">
+            <div v-if="progress.filesTotal > 0" class="mt-1 h-2 overflow-hidden rounded-full bg-line">
               <div
                 class="h-full rounded-full bg-positive transition-[width] duration-500 ease-linear"
                 :style="{ width: overallPct + '%' }"

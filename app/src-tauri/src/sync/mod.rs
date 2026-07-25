@@ -401,7 +401,7 @@ async fn run_all(
     // so the UI gets stable whole-run totals before the first byte transfers.
     let mut prepared: Vec<(&SyncFolder, crate::webdav::WebDavClient, engine::Prepared)> =
         Vec::new();
-    let (mut files_total, mut bytes_total) = (0u64, 0u64);
+    let (mut files_total, mut bytes_total, mut verify_total) = (0u64, 0u64, 0u64);
     for folder in &folders {
         if paused.load(Ordering::Relaxed) {
             publish(app, status_tx, SyncState::Paused, None, None, count, true);
@@ -426,6 +426,7 @@ async fn run_all(
             Ok(p) => {
                 files_total += p.files_total;
                 bytes_total += p.bytes_total;
+                verify_total += p.verify_files;
                 prepared.push((folder, client, p));
             }
             // A cancelled scan is not a sync error — the pause/disable check
@@ -443,7 +444,7 @@ async fn run_all(
         publish(app, status_tx, SyncState::Offline, None, None, count, false);
         return;
     }
-    reporter.session_plan(files_total, bytes_total);
+    reporter.session_plan(files_total, bytes_total, verify_total);
 
     // Phase 2 — execute the transfers. Only surface `Syncing` for folders that
     // actually have work, so a fully-synced run stays visually idle (no flash).
@@ -454,7 +455,9 @@ async fn run_all(
         if folder_disabled(&folder.id) {
             continue;
         }
-        if plan.files_total > 0 {
+        // Verification-only folders still surface `Syncing` — comparing may
+        // stream bytes for a while, and a green "up to date" would be a lie.
+        if plan.files_total > 0 || plan.verify_files > 0 {
             publish(app, status_tx, SyncState::Syncing, Some(folder.remote_path.clone()), None, count, false);
         }
         let cancel = folder_cancel(&folder.id);

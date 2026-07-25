@@ -21,6 +21,8 @@ const emptyProgress: SyncProgress = {
   filesTotal: 0,
   bytesDone: 0,
   bytesTotal: 0,
+  verifyDone: 0,
+  verifyTotal: 0,
   speed: 0,
   etaSecs: null,
 };

@@ -54,7 +54,9 @@ pub enum SyncEvent {
     SessionPlan { files: u64, bytes: u64, verify_files: u64 },
     /// End of a run.
     SessionEnd,
-    FileStart { path: String, dir: Direction, total: u64 },
+    /// `resumed` bytes were already on disk from an earlier attempt — they
+    /// count toward the progress bar but not toward the transfer speed.
+    FileStart { path: String, dir: Direction, total: u64, resumed: u64 },
     FileProgress { path: String, done: u64, total: u64 },
     FileDone { path: String, dir: Direction, size: u64 },
     /// A transfer failed/gave up — drop it from the in-flight set (no completion).
@@ -92,8 +94,8 @@ impl Reporter {
     pub fn session_end(&self) {
         self.send(SyncEvent::SessionEnd);
     }
-    pub fn file_start(&self, path: &str, dir: Direction, total: u64) {
-        self.send(SyncEvent::FileStart { path: path.into(), dir, total });
+    pub fn file_start(&self, path: &str, dir: Direction, total: u64, resumed: u64) {
+        self.send(SyncEvent::FileStart { path: path.into(), dir, total, resumed });
     }
     pub fn file_progress(&self, path: &str, done: u64, total: u64) {
         self.send(SyncEvent::FileProgress { path: path.into(), done, total });
@@ -194,7 +196,11 @@ pub async fn consume(
     activity: ActivityLog,
 ) {
     let mut p = Progress::default();
-    let mut last_bytes = 0u64; // bytes_done at previous tick, for speed
+    // Bytes that actually crossed the network. Feeds the speed readout —
+    // `bytes_done` also swallows resumed-from-disk partials in one jump, which
+    // used to show up as an absurd "download speed".
+    let mut net_bytes = 0u64;
+    let mut last_net = 0u64; // net_bytes at previous tick, for speed
     // Files currently in flight (one entry per concurrent transfer). Also
     // drives correct per-file byte accounting into the global total.
     let mut active: HashMap<String, ActiveFile> = HashMap::new();
@@ -212,7 +218,8 @@ pub async fn consume(
                             phase: "scanning".into(),
                             ..Default::default()
                         };
-                        last_bytes = 0;
+                        net_bytes = 0;
+                        last_net = 0;
                         active.clear();
                         speed_ema = 0.0;
                     }
@@ -241,10 +248,14 @@ pub async fn consume(
                         active.clear();
                         speed_ema = 0.0;
                     }
-                    SyncEvent::FileStart { path, dir, total } => {
+                    SyncEvent::FileStart { path, dir, total, resumed } => {
+                        // Resumed bytes are already on disk: restore them into
+                        // the bar (an earlier abort subtracted them) but keep
+                        // them out of `net_bytes` / the speed.
+                        p.bytes_done += resumed;
                         active.insert(
                             path.clone(),
-                            ActiveFile { path, direction: dir.as_str().into(), done: 0, total },
+                            ActiveFile { path, direction: dir.as_str().into(), done: resumed, total },
                         );
                     }
                     SyncEvent::FileProgress { path, done, total } => {
@@ -256,7 +267,15 @@ pub async fn consume(
                             done: 0,
                             total,
                         });
-                        p.bytes_done += done.saturating_sub(entry.done);
+                        if done < entry.done {
+                            // The server ignored the resume request and the
+                            // transfer restarted from zero — roll the bar back.
+                            p.bytes_done = p.bytes_done.saturating_sub(entry.done - done);
+                        } else {
+                            let delta = done - entry.done;
+                            p.bytes_done += delta;
+                            net_bytes += delta;
+                        }
                         entry.done = done;
                         entry.total = total;
                     }
@@ -265,6 +284,7 @@ pub async fn consume(
                         // True the file up to its full size, then forget it.
                         let seen = active.remove(&path).map_or(0, |a| a.done);
                         p.bytes_done += size.saturating_sub(seen);
+                        net_bytes += size.saturating_sub(seen);
                         push_activity(
                             &activity,
                             match dir {
@@ -311,8 +331,8 @@ pub async fn consume(
                 }
             }
             _ = interval.tick() => {
-                let delta = p.bytes_done.saturating_sub(last_bytes);
-                last_bytes = p.bytes_done;
+                let delta = net_bytes.saturating_sub(last_net);
+                last_net = net_bytes;
                 if p.active {
                     let instant = delta as f64 * (1000.0 / TICK.as_millis() as f64);
                     speed_ema = SPEED_ALPHA * instant + (1.0 - SPEED_ALPHA) * speed_ema;

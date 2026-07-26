@@ -28,6 +28,13 @@ export function basename(path: string): string {
   return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
+/** Parent directory of `path` ("" when it has none). */
+export function dirname(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const i = trimmed.lastIndexOf("/");
+  return i > 0 ? trimmed.slice(0, i) : "";
+}
+
 export function relativeTime(iso: string): string {
   const d = new Date(iso).getTime();
   if (Number.isNaN(d)) return "";

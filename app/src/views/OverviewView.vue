@@ -15,7 +15,7 @@ import type {
 } from "../api/types";
 import { useSyncStore } from "../stores/sync";
 import { useAuthStore } from "../stores/auth";
-import { basename, formatDate, formatSize, formatSpeed, relativeTime } from "../utils/format";
+import { basename, dirname, formatDate, formatSize, formatSpeed, relativeTime } from "../utils/format";
 import {
   RefreshCw,
   Folder,
@@ -596,7 +596,9 @@ onMounted(async () => {
                   <component :is="f.direction === 'upload' ? ArrowUp : ArrowDown" class="h-3 w-3" />
                 </span>
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate text-xs text-ink">{{ basename(f.path) }}</span>
+                  <span class="block truncate text-xs text-ink">
+                    {{ basename(f.path) }}<span v-if="dirname(f.path)" class="text-ink-soft"> ({{ dirname(f.path) }})</span>
+                  </span>
                   <div class="mt-0.5 h-1 overflow-hidden rounded-full bg-line">
                     <div
                       class="h-full rounded-full bg-accent transition-[width] duration-500 ease-linear"

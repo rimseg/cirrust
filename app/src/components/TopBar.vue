@@ -14,6 +14,7 @@ import {
   Trash2,
   ArrowUp,
   ArrowDown,
+  ArrowUpDown,
   ChevronDown,
   Plus,
   Check,
@@ -38,9 +39,12 @@ const nav = [
   { to: "/trash", label: "Trash", icon: Trash2 },
 ];
 
-const syncArrow = computed(() =>
-  progress.value.activeFiles.some((f) => f.direction === "upload") ? ArrowUp : ArrowDown,
-);
+// Up, down, or both — the speed next to it is the combined rate either way.
+const syncArrow = computed(() => {
+  const up = progress.value.activeFiles.some((f) => f.direction === "upload");
+  const down = progress.value.activeFiles.some((f) => f.direction === "download");
+  return up && down ? ArrowUpDown : up ? ArrowUp : ArrowDown;
+});
 
 const dotColor = computed(() => {
   const map: Record<SyncState, string> = {

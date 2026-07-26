@@ -247,7 +247,18 @@ async fn run_transfer(
 
     let mut last_err = None;
     for attempt in 1..=TRANSFER_ATTEMPTS {
-        reporter.file_start(&item.key, dir, item.size);
+        // A download picks up from any partial temp left by an earlier attempt
+        // or run; report those bytes so they count as progress, not as speed.
+        let resumed = match item.kind {
+            TransferKind::Download | TransferKind::ConflictDownload => {
+                tokio::fs::metadata(tmp_path(&item.local_full))
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            }
+            TransferKind::Upload => 0,
+        };
+        reporter.file_start(&item.key, dir, item.size, resumed);
         match transfer_once(client, item, reporter).await {
             Ok(entry) => {
                 reporter.file_done(&item.key, dir, entry.size);

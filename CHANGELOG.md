@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 — 2026-07-26
+
+- **Conflicts now show what you're choosing between.** Each conflict in the
+  Overview lists the file's full path (instead of just the server folder) and,
+  for both versions, the size and last-modified date before you pick "Keep
+  mine" or "Keep server". The "mine" numbers come from the conflicted copy on
+  disk; the "server" numbers are asked of the server directly, falling back to
+  local metadata when it can't be reached.
+
 ## 0.1.9 — 2026-07-25
 
 - **Fixed: sync could silently stop working until an app restart.** The OS

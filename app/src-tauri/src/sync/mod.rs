@@ -777,6 +777,18 @@ pub struct Conflict {
     pub local_path: String,
     pub name: String,
     pub original_name: String,
+    /// Absolute local path of the original file (the server's version).
+    pub original_path: String,
+    /// Size/mtime of the conflicted copy ("mine").
+    pub local_size: Option<u64>,
+    pub local_modified: Option<String>,
+    /// Size/mtime of the original file (the server's version), when it exists.
+    pub server_size: Option<u64>,
+    pub server_modified: Option<String>,
+}
+
+fn mtime_rfc3339(md: &std::fs::Metadata) -> Option<String> {
+    md.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
 }
 
 #[tauri::command]
@@ -850,12 +862,20 @@ fn scan_conflicts(cfg: &AppConfig) -> Vec<Conflict> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             if let Some(original_name) = engine::conflict_original(&name) {
+                let original_path = entry.path().with_file_name(&original_name);
+                let copy_md = entry.metadata().ok();
+                let orig_md = std::fs::metadata(&original_path).ok();
                 out.push(Conflict {
                     folder_id: folder.id.clone(),
                     folder_remote: folder.remote_path.clone(),
                     local_path: entry.path().to_string_lossy().into_owned(),
                     name,
                     original_name,
+                    original_path: original_path.to_string_lossy().into_owned(),
+                    local_size: copy_md.as_ref().map(|m| m.len()),
+                    local_modified: copy_md.as_ref().and_then(mtime_rfc3339),
+                    server_size: orig_md.as_ref().map(|m| m.len()),
+                    server_modified: orig_md.as_ref().and_then(mtime_rfc3339),
                 });
             }
         }
@@ -864,9 +884,37 @@ fn scan_conflicts(cfg: &AppConfig) -> Vec<Conflict> {
 }
 
 /// Scan synced folders for leftover "conflicted copy" files.
+///
+/// The disk scan fills the server-side size/mtime from the local original
+/// (whose mtime is really the download time); when the server is reachable a
+/// PROPFIND replaces them with the server's own answer.
 #[tauri::command]
-pub fn sync_conflicts(app: AppHandle) -> AppResult<Vec<Conflict>> {
-    Ok(scan_conflicts(&AppConfig::load(&app)?))
+pub async fn sync_conflicts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<Conflict>> {
+    let cfg = AppConfig::load(&app)?;
+    let mut conflicts = scan_conflicts(&cfg);
+    for c in &mut conflicts {
+        let Some(folder) = cfg.sync_folders.iter().find(|f| f.id == c.folder_id) else {
+            continue;
+        };
+        let Ok(client) = state.client_for(&folder.account_id).await else { continue };
+        let Ok(rel) = Path::new(&c.original_path).strip_prefix(&folder.local_path) else {
+            continue;
+        };
+        let remote = engine::remote_join(
+            &folder.remote_path,
+            &rel.to_string_lossy().replace('\\', "/"),
+        );
+        if let Ok(Some(entry)) = client.stat(&remote).await {
+            c.server_size = Some(entry.size);
+            if entry.mtime.is_some() {
+                c.server_modified = entry.mtime;
+            }
+        }
+    }
+    Ok(conflicts)
 }
 
 /// Delete every conflicted-copy file whose content is byte-identical to its

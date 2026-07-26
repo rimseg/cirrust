@@ -15,7 +15,7 @@ import type {
 } from "../api/types";
 import { useSyncStore } from "../stores/sync";
 import { useAuthStore } from "../stores/auth";
-import { basename, formatSize, formatSpeed, relativeTime } from "../utils/format";
+import { basename, formatDate, formatSize, formatSpeed, relativeTime } from "../utils/format";
 import {
   RefreshCw,
   Folder,
@@ -162,6 +162,13 @@ function folderMeta(folder: { id: string }) {
   const stat = folderStats.value.find((s) => s.id === folder.id);
   if (!stat || stat.files === 0) return "";
   return `${stat.files.toLocaleString()} files · ${formatSize(stat.bytes)}`;
+}
+
+/** "1.2 MB · Jul 20, 2026, 10:31" for one side of a conflict. */
+function versionMeta(size: number | null, modified: string | null): string {
+  const s = size != null ? formatSize(size) : "—";
+  const m = modified ? formatDate(modified) : "unknown date";
+  return `${s} · ${m}`;
 }
 
 async function dismissIdentical() {
@@ -525,24 +532,38 @@ onMounted(async () => {
             <li
               v-for="c in conflicts"
               :key="c.localPath"
-              class="flex items-center gap-3 rounded-lg bg-surface px-3 py-2"
+              class="rounded-lg bg-surface px-3 py-2"
             >
-              <span class="min-w-0 flex-1">
-                <span class="block truncate text-sm text-ink">{{ c.originalName }}</span>
-                <span class="block truncate text-xs text-ink-soft">{{ c.folderRemote }}</span>
+              <span class="block truncate text-sm text-ink">{{ c.originalName }}</span>
+              <span class="block truncate text-xs text-ink-soft" :title="c.originalPath">
+                {{ c.originalPath }}
               </span>
-              <button
-                class="rounded border border-line px-2 py-1 text-xs text-ink hover:bg-surface-alt"
-                @click="syncStore.resolveConflict(c.localPath, 'local')"
-              >
-                Keep mine
-              </button>
-              <button
-                class="rounded border border-line px-2 py-1 text-xs text-ink hover:bg-surface-alt"
-                @click="syncStore.resolveConflict(c.localPath, 'remote')"
-              >
-                Keep server
-              </button>
+              <div class="mt-2 grid gap-1.5 sm:grid-cols-2">
+                <div class="flex items-center justify-between gap-2 rounded border border-line px-2 py-1.5">
+                  <span class="min-w-0 truncate text-xs text-ink-soft">
+                    <span class="font-medium text-ink">Mine</span>
+                    · {{ versionMeta(c.localSize, c.localModified) }}
+                  </span>
+                  <button
+                    class="shrink-0 rounded border border-line px-2 py-1 text-xs text-ink hover:bg-surface-alt"
+                    @click="syncStore.resolveConflict(c.localPath, 'local')"
+                  >
+                    Keep mine
+                  </button>
+                </div>
+                <div class="flex items-center justify-between gap-2 rounded border border-line px-2 py-1.5">
+                  <span class="min-w-0 truncate text-xs text-ink-soft">
+                    <span class="font-medium text-ink">Server</span>
+                    · {{ versionMeta(c.serverSize, c.serverModified) }}
+                  </span>
+                  <button
+                    class="shrink-0 rounded border border-line px-2 py-1 text-xs text-ink hover:bg-surface-alt"
+                    @click="syncStore.resolveConflict(c.localPath, 'remote')"
+                  >
+                    Keep server
+                  </button>
+                </div>
+              </div>
             </li>
           </ul>
         </section>

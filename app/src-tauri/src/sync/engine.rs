@@ -1080,7 +1080,7 @@ async fn ensure_remote_dir(client: &WebDavClient, path: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn remote_join(base: &str, rel: &str) -> String {
+pub(super) fn remote_join(base: &str, rel: &str) -> String {
     let b = base.trim_matches('/');
     if b.is_empty() {
         format!("/{}", rel)

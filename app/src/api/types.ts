@@ -61,6 +61,14 @@ export interface Conflict {
   localPath: string;
   name: string;
   originalName: string;
+  /** Absolute local path of the original file (the server's version). */
+  originalPath: string;
+  /** Size/mtime of the conflicted copy ("mine"). */
+  localSize: number | null;
+  localModified: string | null;
+  /** Size/mtime of the original file (the server's version), when it exists. */
+  serverSize: number | null;
+  serverModified: string | null;
 }
 
 export interface ActiveFile {

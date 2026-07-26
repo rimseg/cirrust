@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 — 2026-07-26
+
+- **The transfer speed is honest now.** Resumed downloads counted their
+  already-on-disk partial as freshly transferred bytes in one jump, briefly
+  showing disk-read speeds as "download speed" (most visible on first syncs,
+  where retries make resumes common). The speed readout is now fed only by
+  bytes that actually cross the network; the progress bar still credits
+  resumed bytes as progress.
+- **Simultaneous up- and downloads show an up-down icon** in the top bar with
+  the combined rate, instead of a single arrow picked by whichever direction
+  happened to be active.
+- **Transfer rows show the file's parent path** behind the filename, e.g.
+  `song.mp3 (00_media/albums)`.
+
 ## 0.2.0 — 2026-07-26
 
 - **Conflicts now show what you're choosing between.** Each conflict in the
